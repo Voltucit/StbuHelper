@@ -203,7 +203,6 @@ final class Academic {
 
     private func homework(owner: String) async throws {
         var choice = try tracking()
-        let key = try trackingKey()
         if choice.selected?.isEmpty != true && (choice.selected == nil || Date().timeIntervalSince(choice.updatedAt) >= 21_600 ||
             !(Set(choice.selected ?? []).isSubset(of: Set(choice.courses.map(\.key))))) {
             _ = try await refreshCourses()

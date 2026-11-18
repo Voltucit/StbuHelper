@@ -13,7 +13,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationC
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
         do {
-            let controller = try CampusController()
+            let store = try CampusStore()
+            let controller = try CampusController(store: store)
             campus = controller
             window.rootViewController = controller
             if let url = options?[.url] as? URL { _ = controller.openWidget(url) }
@@ -87,8 +88,7 @@ final class CampusController: UIViewController, WKNavigationDelegate, UIDocument
     private var pickerPurpose: PickerPurpose?
     private var pickerResult: CheckedContinuation<Object, Error>?
 
-    init() throws {
-        let store = try CampusStore()
+    init(store: CampusStore) throws {
         self.store = store
         let academic = Academic(store: store)
         self.academic = academic
