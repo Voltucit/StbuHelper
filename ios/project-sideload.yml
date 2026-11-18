@@ -1,0 +1,9 @@
+include: project-base.yml
+name: StbuHelperSideload
+settings:
+  base:
+    STBU_BUNDLE_ID: cn.stbu.helper.sideload
+targets:
+  StbuHelper:
+    info:
+      path: Config/SideloadInfo.plist

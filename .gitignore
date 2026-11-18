@@ -31,3 +31,34 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+# Android / StbuHelper
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.jks
+*.keystore
+keystore.properties
+.idea/workspace.xml
+.idea/libraries/
+.impeccable/
+
+/app/Debug/
+/app/Release/
+*.apk
+
+# Gradle generates IDEA module metadata
+*.iml
+
+# Generated iOS project and local signing state
+/ios/Debug/
+/ios/Release/
+/ios/ExportOptions.local.plist
+/ios/StbuHelper.xcodeproj/
+/ios/StbuHelperSideload.xcodeproj/
+/ios/Config/AppInfo.plist
+/ios/Config/SideloadInfo.plist
+/ios/Config/WidgetInfo.plist
+/ios/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+xcuserdata/

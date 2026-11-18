@@ -1,0 +1,58 @@
+name: iOS Sideload IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build unsigned iPhone app
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec project-sideload.yml
+
+      - name: Compile for iPhone
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project StbuHelperSideload.xcodeproj \
+            -scheme StbuHelper \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/stbu-ios-build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package the IPA
+        run: |
+          app="$RUNNER_TEMP/stbu-ios-build/Build/Products/Release-iphoneos/StbuHelper.app"
+          payload="$RUNNER_TEMP/stbu-ios-package/Payload"
+          if [[ ! -f "$app/StbuHelper" || -d "$app/PlugIns" ]]; then
+            echo "::error::Expected the iPhone app without widget extensions."
+            exit 1
+          fi
+          mkdir -p "$payload"
+          /usr/bin/ditto "$app" "$payload/StbuHelper.app"
+          /usr/bin/ditto -c -k --norsrc --keepParent "$payload" "$RUNNER_TEMP/StbuHelper-Sideload.ipa"
+
+      - name: Publish downloadable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/StbuHelper-Sideload.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 7

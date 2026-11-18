@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="campus_widget_surface">#19211D</color>
+    <color name="campus_widget_ink">#EEF3EF</color>
+    <color name="campus_widget_accent">#A2DBB9</color>
+</resources>

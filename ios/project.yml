@@ -1,0 +1,35 @@
+include: project-base.yml
+settings:
+  base:
+    STBU_APP_GROUP: group.cn.stbu.helper
+targets:
+  StbuHelper:
+    dependencies:
+      - target: StbuWidgets
+        embed: true
+    info:
+      properties:
+        StbuAppGroup: $(STBU_APP_GROUP)
+        CFBundleURLTypes:
+          - CFBundleURLName: $(STBU_BUNDLE_ID).widget
+            CFBundleURLSchemes: [stbu-helper]
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Config/AppGroup.entitlements
+  StbuWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    info:
+      path: Config/WidgetInfo.plist
+      properties:
+        CFBundleDisplayName: 川工商小助手组件
+        StbuAppGroup: $(STBU_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(STBU_BUNDLE_ID).widgets
+        CODE_SIGN_ENTITLEMENTS: Config/AppGroup.entitlements
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES

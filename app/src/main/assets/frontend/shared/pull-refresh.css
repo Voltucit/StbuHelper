@@ -1,0 +1,12 @@
+html { overscroll-behavior-y: contain; }
+.refresh-indicator { position:fixed; top:12px; left:50%; z-index:20; display:flex; align-items:center; gap:9px; padding:10px 16px; border:1px solid var(--line); border-radius:12px; background:var(--surface); color:var(--accent); font-size:13px; pointer-events:none; transform:translate(-50%, 0); }
+.refresh-indicator[hidden] { display:none; }
+.refresh-indicator.is-pulling { transform:translate(-50%, var(--pull-offset, -62px)); }
+.refresh-spinner { display:block; width:19px; height:19px; flex:none; border:2px solid var(--line); border-top-color:var(--accent); border-right-color:var(--accent); border-radius:50%; }
+.refresh-indicator.is-ready .refresh-spinner { border-color:var(--accent); }
+.refresh-indicator.is-running { animation: refresh-in 170ms var(--motion-ease) both; }
+@keyframes refresh-in { from { opacity:0; transform:translate(-50%,-5px); } to { opacity:1; transform:translate(-50%,0); } }
+.refresh-indicator.is-running .refresh-spinner, #sync-button[aria-busy=true] svg { animation:sync-turn .85s linear infinite; }
+#sync-button[aria-busy=true] { color:var(--accent); opacity:1; }
+@keyframes sync-turn { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .refresh-indicator.is-running .refresh-spinner, #sync-button[aria-busy=true] svg { animation:none; } }

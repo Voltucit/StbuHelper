@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="theme-color" content="#f7f8f5">
+  <title>校园助手</title>
+  <script src="shared/preferences.js"></script>
+  <link rel="stylesheet" href="shared/styles.css">
+  <link rel="stylesheet" href="shared/appearance.css">
+  <link rel="stylesheet" href="shared/pull-refresh.css">
+  <link rel="stylesheet" href="pages/home/styles.css">
+  <link rel="stylesheet" href="pages/timetable/styles.css">
+  <link rel="stylesheet" href="pages/study/styles.css">
+  <link rel="stylesheet" href="pages/life/styles.css">
+  <link rel="stylesheet" href="pages/account/styles.css">
+  <link rel="stylesheet" href="pages/settings/styles.css">
+  <link rel="stylesheet" href="shared/motion.css">
+  <script src="shared/model.js" defer></script>
+  <script src="shared/runtime.js" defer></script>
+  <script src="shared/motion.js" defer></script>
+  <script src="shared/native-bridge.js" defer></script>
+  <script src="shared/input-compat.js" defer></script>
+  <script src="shared/pull-refresh.js" defer></script>
+  <script src="shared/ui.js" defer></script>
+  <script src="shared/selectors.js" defer></script>
+  <script src="shared/records.js" defer></script>
+  <script src="pages/home/view.js" defer></script>
+  <script src="pages/timetable/view.js" defer></script>
+  <script src="pages/timetable/actions.js" defer></script>
+  <script src="pages/study/view.js" defer></script>
+  <script src="pages/study/tracking.js" defer></script>
+  <script src="pages/study/reminders.js" defer></script>
+  <script src="pages/life/view.js" defer></script>
+  <script src="pages/life/devices.js" defer></script>
+  <script src="pages/life/account.js" defer></script>
+  <script src="pages/life/bills.js" defer></script>
+  <script src="pages/life/recharge.js" defer></script>
+  <script src="pages/life/receipt.js" defer></script>
+  <script src="pages/me/view.js" defer></script>
+  <script src="pages/settings/academic.js" defer></script>
+  <script src="pages/settings/view.js" defer></script>
+  <script src="pages/settings/background.js" defer></script>
+  <script src="pages/account/login.js" defer></script>
+  <script src="shared/router.js" defer></script>
+  <script src="shared/sync.js" defer></script>
+  <script src="bootstrap.js" defer></script>
+</head>
+<body>
+  <div class="refresh-indicator" id="refresh-indicator" role="status" aria-live="polite" hidden><span class="refresh-spinner" aria-hidden="true"></span><span id="refresh-label">下拉刷新</span></div>
+  <div class="app-shell">
+    <header class="app-header">
+      <div><h1 id="page-title">今天</h1><p id="page-subtitle">四川工商学院</p></div>
+      <button class="icon-button" id="sync-button" aria-label="同步数据"></button>
+    </header>
+    <main id="content" tabindex="-1" aria-labelledby="page-title">
+      <div id="study-tabs" class="segmented" role="group" aria-label="学习分类" hidden></div>
+      <div id="page-content"></div>
+    </main>
+    <nav class="bottom-nav" aria-label="主导航"><div class="nav-items"></div></nav>
+  </div>
+  <dialog id="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-header"><h2 id="sheet-title" tabindex="-1" autofocus></h2><button class="icon-button" id="close-sheet" aria-label="关闭"></button></div>
+    <div id="sheet-body"></div>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <input type="file" id="json-file" accept="application/json,.json" hidden>
+</body>
+</html>

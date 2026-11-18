@@ -1,0 +1,3 @@
+-keepclassmembers class cn.stbu.helper.ui.LocalBridge { @android.webkit.JavascriptInterface <methods>; }
+-keepclassmembers class com.hualala.linyu.model.** { <fields>; }
+-keepclassmembers class com.hualala.linyu.data.BleShowerController$Session { <fields>; }

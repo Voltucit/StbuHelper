@@ -1,0 +1,17 @@
+.study-tools{flex-wrap:wrap}.tracking-mode{border:0;padding:0;margin:18px 0}.tracking-mode legend{font-size:13px;font-weight:600}.tracking-mode label{display:flex;align-items:center;gap:10px;min-height:44px;margin:0;font-weight:400}.tracking-mode input{width:18px;min-height:18px;height:18px;padding:0;accent-color:var(--accent)}.tracking-tools{margin:12px 0;flex-wrap:wrap}.tracking-row{display:flex;align-items:center;gap:12px;margin:0;padding:14px 0;min-height:48px;border-bottom:1px solid var(--line);font-weight:400}.tracking-row span{min-width:0;overflow-wrap:anywhere}.tracking-row input{flex:0 0 19px}.tracking-row:has(input:disabled){color:var(--muted)}#save-tracking{margin-top:14px}
+.tracking-course-name{display:block;font-size:14px;font-weight:500}.tracking-teacher{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+.task-link{min-width:0}.task-link>span:first-child{min-width:0;overflow-wrap:anywhere}
+
+.segmented { position: relative; }
+.segmented button { position: relative; min-width: 0; }
+.segmented button[aria-pressed=true] { color: var(--ink); font-weight: 600; }
+.segment-indicator {
+  position: absolute;
+  inset: 4px auto 4px 4px;
+  width: calc((100% - 23px) / 4);
+  border-radius: 7px;
+  background: var(--surface);
+  transform: translateX(calc(var(--tab-index, 0) * (100% + 5px)));
+  transition: transform 220ms var(--motion-ease);
+  pointer-events: none;
+}

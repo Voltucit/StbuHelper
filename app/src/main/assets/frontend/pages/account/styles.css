@@ -1,0 +1,7 @@
+.account-remember { display:flex; align-items:center; gap:10px; margin:18px 0; font-weight:400; }
+.account-remember input { width:20px; height:20px; margin:0; accent-color:var(--accent); }
+.account-captcha { display:flex; align-items:center; gap:14px; margin:12px 0; }
+.account-captcha img { width:132px; height:52px; object-fit:contain; background:#fff; border:1px solid var(--line); border-radius:8px; }
+#account-challenge:not(:empty) { margin-top:20px; padding-top:18px; border-top:1px solid var(--line); }
+#account-status:empty, #account-error:empty { display:none; }
+#account-send-sms { margin-bottom:12px; }

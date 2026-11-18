@@ -1,0 +1,43 @@
+.settings-first-heading{margin-top:8px}
+.theme-options,.settings-message-fields{border:0;padding:0;margin:0;min-width:0}
+.theme-options legend{font-size:14px;font-weight:600;padding:0;margin-bottom:5px}
+.theme-group-label{margin:6px 0 4px}
+.theme-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 14px}
+.theme-choice{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:84px;margin:0;padding:10px 2px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:12px;font-weight:500;cursor:pointer}
+.theme-choice input{position:absolute;opacity:0;width:1px;height:1px;min-height:0;padding:0;margin:0;border:0}
+.theme-dot{display:block;width:26px;height:26px;border-radius:50%;background:var(--swatch)}
+.theme-choice[data-color=green]{--swatch:#24634b}.theme-choice[data-color=blue]{--swatch:#235db5}.theme-choice[data-color=purple]{--swatch:#7546a8}.theme-choice[data-color=orange]{--swatch:#985013}.theme-choice[data-color=rose]{--swatch:#ad3c61}
+.theme-choice[data-color=mist]{--swatch:#43607a}.theme-choice[data-color=indigo]{--swatch:#5053a4}.theme-choice[data-color=teal]{--swatch:#176c72}
+.theme-choice[data-color=cobalt]{--swatch:#304bbc}
+.theme-choice[data-color=deepsea]{--swatch:#204962}
+.theme-choice[data-color=jade]{--swatch:#256852}
+.theme-choice[data-color=berry]{--swatch:#844676}
+.theme-choice:has(input:checked){border:2px solid var(--accent);padding:9px 1px;background:var(--soft);color:var(--accent);font-weight:700}
+.theme-choice:has(input:focus-visible){outline:3px solid var(--focus);outline-offset:3px}
+.theme-choice:active{background:var(--soft)}
+.theme-options:disabled .theme-choice{opacity:.58;cursor:wait}
+.night-setting{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:68px;padding:16px 0;margin:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:15px}
+.night-setting small{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:3px}
+.night-setting input { position:absolute; inset-inline-end:0; width:1px; height:1px; min-height:0; opacity:0; }
+.switch-track { flex:0 0 41px; height:24px; padding:3px; border-radius:999px; background:var(--segment-bg); }
+.switch-track::after { display:block; content:""; width:18px; height:18px; border-radius:50%; background:var(--muted); }
+.night-setting input:checked + .switch-track { background:var(--accent); }
+.night-setting input:checked + .switch-track::after { transform:translateX(17px); background:var(--on-accent); }
+.night-setting input:focus-visible + .switch-track { outline:2px solid var(--focus); outline-offset:3px; }
+.night-setting input:disabled + .switch-track { opacity:.55; }
+.settings-save-status{min-height:20px;margin:10px 0 0}
+.settings-message-fields textarea{min-height:80px;max-height:220px}
+.settings-message-fields .primary{margin-top:8px}
+:root[data-mode=dark] .theme-choice[data-color=green]{--swatch:#8ed0ad}:root[data-mode=dark] .theme-choice[data-color=blue]{--swatch:#92b7f2}:root[data-mode=dark] .theme-choice[data-color=purple]{--swatch:#c6a5e8}:root[data-mode=dark] .theme-choice[data-color=orange]{--swatch:#e8b681}:root[data-mode=dark] .theme-choice[data-color=rose]{--swatch:#efadc3}
+:root[data-mode=dark] .theme-choice[data-color=mist]{--swatch:#aec6df}:root[data-mode=dark] .theme-choice[data-color=indigo]{--swatch:#bcbbf6}:root[data-mode=dark] .theme-choice[data-color=teal]{--swatch:#93d8d5}
+:root[data-mode=dark] .theme-choice[data-color=cobalt]{--swatch:#aebdff}
+:root[data-mode=dark] .theme-choice[data-color=deepsea]{--swatch:#9bc5e1}
+:root[data-mode=dark] .theme-choice[data-color=jade]{--swatch:#a1d9bb}
+:root[data-mode=dark] .theme-choice[data-color=berry]{--swatch:#ebb3de}
+
+.background-actions{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.background-brightness{margin:12px 0 18px}
+.background-brightness>div{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.background-brightness label{margin:0}
+.background-brightness output{color:var(--accent);font-size:13px;font-weight:650;font-variant-numeric:tabular-nums}
+.background-brightness input{min-height:44px;margin:0;padding:0;border:0;background:transparent;accent-color:var(--accent)}
