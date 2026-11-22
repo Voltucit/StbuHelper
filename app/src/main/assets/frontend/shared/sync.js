@@ -55,7 +55,8 @@ function notifySync(state) {
   if (state.running || !state.id || state.id === lastSyncNotice) return;
   lastSyncNotice = state.id;
   if (state.success) toast('同步成功');
-  else if (state.id === manualSyncId) toast(state.needLogin?.length ? '账号登录已失效，请重新连接' : '同步未完成，已保留本机数据');
+  else if (state.id === manualSyncId) toast(state.needLogin?.length ? '账号登录已失效，请重新连接' :
+    state.homeworkComplete === false && state.homeworkIssue ? state.homeworkIssue : '同步未完成，已保留本机数据');
 }
 
 function pollSync(delay = 1500) {

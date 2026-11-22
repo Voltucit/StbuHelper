@@ -103,12 +103,13 @@ object CampusWidgets {
         val date = now.atZone(zone).toLocalDate()
         val midnight = date.plusDays(1).atStartOfDay(zone).toInstant()
         val data = runCatching { LocalRepository(context).read() }.getOrNull()
-        val tasks = if (homework && data != null) pending(context, data, now, midnight) else emptyList()
+        val tasks = if (homework && data != null) pending(context, data, now) else emptyList()
         val courses = if (!homework && data != null) todayCourses(data, date) else emptyList()
         val upcoming = courses.firstOrNull { it.item.whenAt.isAfter(now) }
         val current = if (upcoming == null) courses.lastOrNull { it.end?.isAfter(now) == true } else null
         val first = if (homework) tasks.firstOrNull() else upcoming?.item ?: current?.item
-        val refreshAt = current?.end ?: first?.whenAt ?: midnight
+        val nextChange = current?.end ?: first?.whenAt ?: midnight
+        val refreshAt = if (homework) minOf(nextChange, midnight) else nextChange
         val fallback = if (homework) AppPreferences.EMPTY_TASKS else AppPreferences.EMPTY_DAY
         val key = if (homework) "emptyTasksMessage" else "emptyDayMessage"
         val message = AppPreferences(context).read().optString(key).trim().ifBlank { fallback }
@@ -123,7 +124,7 @@ object CampusWidgets {
             setViewVisibility(R.id.widget_name, if (first == null) View.GONE else View.VISIBLE)
             val detail = first?.let {
                 val time = current?.end?.let { end -> clock.format(end) + " 下课" }
-                    ?: if (homework) clock.format(it.whenAt) + " 截止" else clock.format(it.whenAt)
+                    ?: if (homework) deadlineLabel(it.whenAt, date) else clock.format(it.whenAt)
                 listOf(time, it.detail).filter(String::isNotBlank).joinToString(" · ")
             }.orEmpty()
             setTextViewText(R.id.widget_detail, detail)
@@ -143,13 +144,26 @@ object CampusWidgets {
         }
     }
 
-    private fun pending(context: Context, data: JSONObject, now: Instant, midnight: Instant): List<Item> {
+    private fun deadlineLabel(deadline: Instant, today: LocalDate): String {
+        val due = deadline.atZone(zone).toLocalDate()
+        val day = when (due) {
+            today -> "今天"
+            today.plusDays(1) -> "明天"
+            else -> {
+                val year = if (due.year == today.year) "" else "${due.year}年"
+                "$year${due.monthValue}月${due.dayOfMonth}日"
+            }
+        }
+        return "$day ${clock.format(deadline)} 截止"
+    }
+
+    private fun pending(context: Context, data: JSONObject, now: Instant): List<Item> {
         val selection = runCatching { HomeworkTracking(context).selection() }.getOrElse { return emptyList() }
         val tasks = data.optJSONArray("tasks") ?: JSONArray()
         return (0 until tasks.length()).mapNotNull { index ->
             val task = tasks.optJSONObject(index) ?: return@mapNotNull null
             val deadline = task.optLong("deadlineAt")
-            if (deadline >= midnight.toEpochMilli() || !selection.includes(task.optString("groupId")) ||
+            if (!selection.includes(task.optString("groupId")) ||
                 !AcademicParsers.actionable(task.optString("status"), deadline, now.toEpochMilli())) return@mapNotNull null
             Item(task.optString("name"), task.optString("course"), Instant.ofEpochMilli(deadline))
         }.sortedBy { it.whenAt }

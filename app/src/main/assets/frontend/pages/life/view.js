@@ -5,14 +5,21 @@ function sameDevice(a, b) { return !!a && !!b && String(a).replace(/[:-]/g, '').
 function waterName(kind) { return kind === 'drinking' ? '饮水' : '洗澡'; }
 
 function waterStatus() {
-  if (life.active) return `<div class="alert"><p>${life.active.confirmed ? '设备正在使用' : '有待确认的用水记录'}</p><p class="pre-deduct">${life.active.preDeductMoney != null ? '预扣金额：¥ ' + esc(life.active.preDeductMoney) : '预扣金额未提供'}</p><button class="danger wide" data-action="life-end-active" ${waterEnding ? 'disabled' : ''}>${life.active.confirmed ? '断开并结束使用' : '结束并核对结算'}</button></div>`;
+  if (life.ratePending) return '<div class="alert"><p>上一笔计费请求尚未确认，请先在趣智校园官方 App 核对。</p><button class="secondary wide" data-action="life-review-rate">我已在官方核对订单</button></div>';
+  if (life.active) {
+    const using = life.active.confirmed && sameDevice(life.active.mac, life.bluetooth?.mac);
+    const title = life.active.unsent ? '开启指令尚未发送，有计费订单待处理' : life.active.stopped ? '设备已停止用水，结算待核对' : using ? '设备正在使用' : '有待确认的用水记录';
+    const action = life.active.unsent ? '处理计费订单' : life.active.stopped ? '核对结算' : using ? '断开并结束使用' : '结束并核对结算';
+    return `<div class="alert"><p>${title}</p><p class="pre-deduct">${life.active.preDeductMoney != null ? '预扣金额：¥ ' + esc(life.active.preDeductMoney) : '预扣金额未提供'}</p><button class="danger wide" data-action="life-end-active" ${waterEnding ? 'disabled' : ''}>${action}</button></div>`;
+  }
   if (life.bluetooth?.mac) return `<div class="connection-note"><p>设备蓝牙已连接</p><button class="danger wide" data-action="life-end-active" ${waterEnding ? 'disabled' : ''}>断开连接</button></div>`;
   return '';
 }
 
 function settlementView() {
   if (!lastSettlement) return '';
-  return `<section class="settlement-note"><h3>最近一次使用</h3><p>${lastSettlement.money != null ? '已结算 ' + esc(lastSettlement.money) + ' 元' : lastSettlement.balancePending ? '用水已结束，余额可稍后刷新' : '结算已完成，账单明细等待更新'}</p></section>`;
+  const message = lastSettlement.deviceCleared === false ? '已记账，设备记录待清理' : lastSettlement.balancePending ? '用水已结束，余额可稍后刷新' : '用水已结算，明细可在消费账单查看';
+  return `<section class="settlement-note"><h3>最近一次使用</h3><p>${message}</p></section>`;
 }
 
 function lifeView() {

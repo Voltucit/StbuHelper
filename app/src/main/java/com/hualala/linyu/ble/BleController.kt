@@ -40,6 +40,8 @@ sealed interface BleConnectResult {
     data class Failed(val reason: String) : BleConnectResult
 }
 
+enum class RateWriteResult { NOT_SENT, CONFIRMED, UNCONFIRMED }
+
 /**
  * 蓝牙水表的 GATT 连接管理。
  *
@@ -58,7 +60,7 @@ sealed interface BleConnectResult {
  * ```kotlin
  * val st = ble.query() ?: return fail()
  * val rate = api.rateOrder(...) ?: return fail()
- * if (!ble.writeRate(rate)) return fail()
+ * val result = ble.writeRate(rate)
  * ```
  *
  * ## 协议要点（详见 [BleFrame]）
@@ -231,7 +233,8 @@ class BleController(private val context: Context) {
         cmd: Int,
         data: ByteArray = ByteArray(0),
         replyCmd: Int = cmd,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        onQueued: () -> Unit = {}
     ): ByteArray? {
         if (!ready) { AppLogger.w("BLE 未就绪，丢弃命令 0x${cmd.toString(16)}"); return null }
 
@@ -242,7 +245,7 @@ class BleController(private val context: Context) {
         // 被用这一笔的会话上传，服务端对不上账，报 170「签名错误」。
         drainIncoming()
 
-        if (!write(BleFrame.cmdToWire(cmd, data))) return null
+        if (!write(BleFrame.cmdToWire(cmd, data), onQueued)) return null
         return try {
             withTimeout(timeoutMs) {
                 while (true) {
@@ -276,9 +279,14 @@ class BleController(private val context: Context) {
      *
      * @param downData 费率包原始字节（由服务端返回的 hex 串解码而来）
      */
-    suspend fun writeRate(downData: ByteArray, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Boolean {
-        val p = sendAndAwait(CMD_RATE, downData, timeoutMs = timeoutMs) ?: return false
-        return p.isNotEmpty() && (p[0].toInt() and 0xFF) == ACK_OK
+    suspend fun writeRate(downData: ByteArray, timeoutMs: Long = DEFAULT_TIMEOUT_MS): RateWriteResult {
+        var queued = false
+        val reply = sendAndAwait(CMD_RATE, downData, timeoutMs = timeoutMs, onQueued = { queued = true })
+        return when {
+            !queued -> RateWriteResult.NOT_SENT
+            reply != null && reply.isNotEmpty() && (reply[0].toInt() and 0xFF) == ACK_OK -> RateWriteResult.CONFIRMED
+            else -> RateWriteResult.UNCONFIRMED
+        }
     }
 
     /** 关阀（`0x22`）。与官方 SDK 一致，传**一个零字节**而不是空载荷。 */
@@ -320,7 +328,7 @@ class BleController(private val context: Context) {
      * 一帧 HEX 文本动辄上百字节，一次性写只会失败；而连续写不等回执，
      * 设备侧会丢片。
      */
-    private suspend fun write(wire: ByteArray): Boolean {
+    private suspend fun write(wire: ByteArray, onQueued: () -> Unit): Boolean {
         val c = writeChar ?: run { AppLogger.w("BLE 写入失败：特征未就绪"); return false }
         val g = gatt ?: return false
 
@@ -335,6 +343,8 @@ class BleController(private val context: Context) {
                 writeChunk(g, c, chunk)
             } catch (t: Throwable) {
                 AppLogger.e("BLE 写入异常", t)
+                // An exception alone does not establish that Android rejected the chunk before sending.
+                if (offset == 0) onQueued()
                 writeSignal = null
                 return false
             }
@@ -343,6 +353,7 @@ class BleController(private val context: Context) {
                 writeSignal = null
                 return false
             }
+            if (offset == 0) onQueued()
             val ok = try {
                 withTimeout(3_000L) { signal.await() }
             } catch (_: TimeoutCancellationException) {

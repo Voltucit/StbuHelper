@@ -31,16 +31,34 @@ class PortalActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val kind = intent.getStringExtra("kind") ?: "courses"
+        val verification = intent.getBooleanExtra("verifyLearning", false)
         provider = if (kind in setOf("grades", "exams", "portal", "school")) "school" else "learning"
         sessions = AcademicSession(applicationContext)
         sessions.restore()
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
         val toolbar = LinearLayout(this).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
         toolbar.addView(Button(this).apply { text = "返回"; setOnClickListener { remember(web.url); finish() } })
-        status = TextView(this).apply { text = "官方账号登录"; textSize = 12f; setPadding(8, 0, 8, 0) }
+        status = TextView(this).apply { text = if (verification) "学习通验证" else "官方账号登录"; textSize = 12f; setPadding(8, 0, 8, 0) }
         toolbar.addView(status, LinearLayout.LayoutParams(0, -2, 1f))
+        val retry = if (verification) Button(this).apply {
+            text = "完成验证后重试"
+            isEnabled = false
+            setOnClickListener {
+                if (!remember(web.url)) return@setOnClickListener
+                sessions.clearLearningVerification()
+                AcademicSync.start(applicationContext, provider = "learning", afterCurrent = true, homeworkOnly = true)
+                finish()
+            }
+            toolbar.addView(this)
+        } else null
         root.addView(toolbar)
-        root.addView(TextView(this).apply { text = "在官方页面完成首次登录或验证，App 会自动同步；会话有效时无需再次登录。"; textSize = 12f; setTextColor(Color.DKGRAY); setPadding(16, 8, 16, 12) })
+        root.addView(TextView(this).apply {
+            text = if (verification) "请在下方官方页面输入验证码，确认通过后再点「完成验证后重试」。"
+                else "在官方页面完成首次登录或验证，App 会自动同步；会话有效时无需再次登录。"
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+            setPadding(16, 8, 16, 12)
+        })
         web = WebView(this)
         web.settings.apply {
             javaScriptEnabled = true; domStorageEnabled = true
@@ -55,6 +73,7 @@ class PortalActivity : Activity() {
             override fun onPageFinished(view: WebView, url: String) {
                 status.text = Uri.parse(url).host.orEmpty()
                 if (PortalPolicy.dataUrl(url)) {
+                    if (retry != null) { retry.isEnabled = true; return }
                     remember(url)
                     fillSchool(url)
                     val uri = Uri.parse(url)
@@ -141,8 +160,12 @@ class PortalActivity : Activity() {
         web.evaluateJavascript("(()=>{if(location.origin!==$origin||location.pathname!==$path)return;const u=document.querySelector($selectorUser),p=document.querySelector($selectorPass);if(u&&p&&!u.value&&!p.value){u.value=$user;p.value=$password;for(const e of [u,p])e.dispatchEvent(new Event('input',{bubbles:true}));}})()", null)
     }
     @Deprecated("WebView back navigation") override fun onBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
-    private fun remember(url: String?) {
-        try { sessions.capture(url) } catch (_: Exception) { Toast.makeText(this, "登录会话未能加密保存。请稍后重试保存，下次打开可能需要重新登录。", Toast.LENGTH_LONG).show() }
+    private fun remember(url: String?): Boolean = try {
+        sessions.capture(url)
+        true
+    } catch (_: Exception) {
+        Toast.makeText(this, "登录会话未能加密保存。请稍后重试保存，下次打开可能需要重新登录。", Toast.LENGTH_LONG).show()
+        false
     }
     override fun onPause() { if (::web.isInitialized) remember(web.url); super.onPause() }
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); web.destroy(); super.onDestroy() }

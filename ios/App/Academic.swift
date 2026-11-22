@@ -80,8 +80,10 @@ final class Academic {
     }
 
     func autoStart() {
-        if hasAccount(.learning), let owner = try? store.owner(.learning),
-           Date().timeIntervalSince1970 - store.settings.double(forKey: "lastHomework." + owner) >= 10_800 {
+        guard hasAccount(.learning), let owner = try? store.owner(.learning) else { return }
+        let last = max(store.settings.double(forKey: "lastHomework." + owner),
+                       store.settings.double(forKey: "lastHomeworkCheck." + owner))
+        if Date().timeIntervalSince1970 - last >= 43_200 {
             start("learning", scope: "homework")
         }
     }
@@ -95,22 +97,30 @@ final class Academic {
             var failures = [String]()
             var expired = [String]()
             var homeworkComplete: Bool?
+            var homeworkIssue: String?
             let providers = CampusProvider.allCases.filter { selected == "all" ? hasAccount($0) : selected == $0.rawValue }
             for provider in providers {
+                if provider == .learning && scope != "courses" {
+                    homeworkComplete = false
+                    homeworkIssue = "暂时无法确认学习通账号或读取本机缓存。"
+                }
                 guard let owner = try? selectCache(provider, adoptLegacy: true) else { failures.append(provider.rawValue); continue }
                 do {
                     if provider == .learning {
                         var incomplete = false
-                        if scope != "courses" { homeworkComplete = false }
                         if scope != "homework" {
                             do { try await timetable(full: scope != "current", owner: owner) }
                             catch is SessionExpired { throw SessionExpired() }
                             catch { incomplete = true }
                         }
                         if scope != "courses" {
-                            try await homework(owner: owner)
-                            homeworkComplete = true
-                            store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomework." + owner)
+                            store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomeworkCheck." + owner)
+                            homeworkIssue = "学习通的作业列表暂未读取，或本机记录未能保存。"
+                            homeworkIssue = try await homework(owner: owner)
+                            homeworkComplete = homeworkIssue == nil
+                            if homeworkIssue == nil {
+                                store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomework." + owner)
+                            } else { incomplete = true }
                         }
                         if incomplete { failures.append(provider.rawValue) }
                     } else { try await school(owner: owner) }
@@ -119,12 +129,16 @@ final class Academic {
                         store.settings.set(false, forKey: "connected." + provider.rawValue)
                         expired.append(provider.rawValue)
                     } else { failures.append(provider.rawValue) }
+                } catch let error as LearningRateLimited {
+                    if provider == .learning && scope != "courses" { homeworkIssue = error.errorDescription }
+                    failures.append(provider.rawValue)
                 } catch { failures.append(provider.rawValue) }
             }
             publishWidgets()
             await scheduleReminders()
             state = ["id": id, "running": false, "success": !providers.isEmpty && failures.isEmpty && expired.isEmpty, "needLogin": expired]
             if let homeworkComplete { state["homeworkComplete"] = homeworkComplete }
+            if let homeworkIssue { state["homeworkIssue"] = homeworkIssue }
             if let provider = queuedConnections.first {
                 let selected = queuedConnections.count > 1 ? "all" : provider.rawValue
                 queuedConnections.removeAll()
@@ -201,7 +215,7 @@ final class Academic {
         return trackingStatus()
     }
 
-    private func homework(owner: String) async throws {
+    private func homework(owner: String) async throws -> String? {
         var choice = try tracking()
         if choice.selected?.isEmpty != true && (choice.selected == nil || Date().timeIntervalSince(choice.updatedAt) >= 21_600 ||
             !(Set(choice.selected ?? []).isSubset(of: Set(choice.courses.map(\.key))))) {
@@ -213,29 +227,32 @@ final class Academic {
         let history = try store.read().rows("tasks")
         let known = Dictionary(history.map { ($0.text("id"), $0) }, uniquingKeysWith: { first, _ in first })
         var rows = [Object]()
+        var readGroups = Set<String>()
         var refreshed = Set<String>()
-        for offset in stride(from: 0, to: courses.count, by: 3) {
-            let batch = courses[offset..<min(offset + 3, courses.count)]
-            try await withThrowingTaskGroup(of: (String, Data?).self) { group in
-                for course in batch {
-                    group.addTask { @MainActor in
-                        do {
-                            let rows = try await self.courseHomework(course, known: known)
-                            return (course.key, try JSONSerialization.data(withJSONObject: rows))
-                        }
-                        catch is SessionExpired { throw SessionExpired() }
-                        catch { return (course.key, nil) }
+        var missingDeadlines = 0
+        func collect(_ result: (String, Data?)) throws {
+            let (id, data) = result
+            guard let data, let decoded = try JSONSerialization.jsonObject(with: data) as? [Object] else { return }
+            rows += decoded
+            readGroups.insert(id)
+            let unknown = decoded.filter { CampusProjection.isPending($0.text("status")) && $0.number("deadlineAt") <= 0 }.count
+            missingDeadlines += unknown
+            if unknown == 0 { refreshed.insert(id) }
+        }
+        try await withThrowingTaskGroup(of: (String, Data?).self) { group in
+            for (index, course) in courses.enumerated() {
+                if index >= 2, let result = try await group.next() { try collect(result) }
+                group.addTask { @MainActor in
+                    do {
+                        let rows = try await self.courseHomework(course, known: known)
+                        return (course.key, try JSONSerialization.data(withJSONObject: rows))
                     }
-                }
-                for try await (id, result) in group {
-                    if let result, let decoded = try JSONSerialization.jsonObject(with: result) as? [Object] {
-                        rows += decoded
-                        if !decoded.contains(where: { CampusProjection.isPending($0.text("status")) && $0.number("deadlineAt") <= 0 }) {
-                            refreshed.insert(id)
-                        }
-                    }
+                    catch is SessionExpired { throw SessionExpired() }
+                    catch let error as LearningRateLimited { throw error }
+                    catch { return (course.key, nil) }
                 }
             }
+            for try await result in group { try collect(result) }
         }
         try store.requireOwner(.learning, owner)
         guard try learningOwner() == owner else { throw AppError("学习通账号已变化") }
@@ -253,7 +270,14 @@ final class Academic {
         var value = try store.read()
         store.replace("tasks", rows: rows, in: &value)
         try commit(value)
-        if !failed.isEmpty { throw AppError("部分课程作业暂未更新") }
+        guard !failed.isEmpty else { return nil }
+        let unread = courses.count - readGroups.count
+        let missingTracked = expected.count - courses.count
+        var issues = [String]()
+        if unread > 0 { issues.append("\(unread) 门课程的作业暂未读取") }
+        if missingDeadlines > 0 { issues.append("\(missingDeadlines) 项作业的截止时间待确认") }
+        if missingTracked > 0 { issues.append("\(missingTracked) 门追踪课程未在目录找到，可在「课程追踪」核对") }
+        return issues.joined(separator: "，") + "。"
     }
 
     private func courseHomework(_ course: Course, known: [String: Object]) async throws -> [Object] {
@@ -314,6 +338,7 @@ final class Academic {
                         if deadline == 0 { deadline = Self.labelledDeadline(try page.text()) }
                         if deadline > 0 { checked = now }
                     } catch is SessionExpired { throw SessionExpired() }
+                    catch let error as LearningRateLimited { throw error }
                     catch { deadline = 0 }
                 }
             }
@@ -322,8 +347,10 @@ final class Academic {
                          ? CampusProjection.format(Date(timeIntervalSince1970: Double(deadline) / 1000), "yyyy-MM-dd HH:mm") : "截止时间未提供",
                          "url": taskURL?.absoluteString ?? "", "source": "school", "provider": "learning"])
         }
-        if rows.isEmpty, try list.text().range(of: #"暂无作业|没有作业|共\s*0\s*[份个]"#, options: .regularExpression) == nil {
-            throw AppError("作业列表格式暂未识别")
+        if rows.isEmpty {
+            let emptyProgress = html.range(of: #"<span>\s*0\s*/\s*0\s*</span>\s*</div>\s*</div>"#, options: [.regularExpression, .caseInsensitive]) != nil
+            let emptyText = try list.text().range(of: #"(?:暂无|没有)作业(?!权限|入口|功能)|共\s*0\s*[份个]"#, options: .regularExpression) != nil
+            guard emptyProgress || emptyText else { throw AppError("作业列表格式暂未识别") }
         }
         return rows
     }

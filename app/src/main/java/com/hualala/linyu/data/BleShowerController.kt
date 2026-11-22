@@ -8,11 +8,16 @@ import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.BleController
 import com.hualala.linyu.ble.BleFrame
 import com.hualala.linyu.ble.DeviceQueryState
+import com.hualala.linyu.ble.RateWriteResult
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.KlcxkjCrypto
 import com.hualala.linyu.utils.KlcxkjSigner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import com.google.gson.JsonParseException
+import org.json.JSONException
+import java.io.IOException
 
 /**
  * 蓝牙水表的**开阀 / 结算编排**。
@@ -73,7 +78,7 @@ object BleShowerController {
          */
         data class Recovered(val message: String) : OpenOutcome
 
-        /** 明确失败——可以安全重试 */
+        /** 本次开启已停止，计费状态由本机记录单独跟踪。 */
         data class Failed(val message: String) : OpenOutcome
 
         /**
@@ -97,7 +102,7 @@ object BleShowerController {
         data class Uploaded(val rawUpMoney: Int?, val recordCleared: Boolean) : SettleOutcome
 
         /** 关阀成功，但尚未确认消费上传成功 */
-        data class PartialSettlement(val message: String) : SettleOutcome
+        data class PartialSettlement(val message: String, val meterState: Int? = null) : SettleOutcome
 
         /** 关阀都没成功 */
         data class CloseFailed(val message: String) : SettleOutcome
@@ -111,6 +116,8 @@ object BleShowerController {
 
     /** state=6：实测到的另一种「有遗留数据」状态（官方不识别，先与 3 同处理） */
     private const val STATE_PENDING_SETTLE_ALT = 6
+
+    internal fun hasPendingSettlement(state: Int?) = state == STATE_PENDING_SETTLE || state == STATE_PENDING_SETTLE_ALT
 
     /**
      * 「签名错误，请更新版本」——服务端认为上传的数据与签名对不上。
@@ -191,7 +198,7 @@ object BleShowerController {
 
         try {
             // ② 查询设备状态——protocolType 和 randomNumber 都必须用设备给的
-            var st = ble.query()
+            val st = ble.query()
                 ?: return OpenOutcome.Failed("设备无响应，请靠近后重试")
             AppLogger.i("蓝牙状态：protocol=${st.protocolType} random=${st.randomNumber} state=${st.state}")
 
@@ -200,7 +207,7 @@ object BleShowerController {
                 // state=3/6：设备**已关阀但有遗留未结算记录**（上一笔结算失败留下的）。
                 // 官方 App 此时走 confirmValveClosed(collect=true) 补结算：0x85 采集 →
                 // 上传 → 0x86 写回，清掉记录后设备回到空闲。不处理的话永远开不了阀。
-                if (st.state == STATE_PENDING_SETTLE || st.state == STATE_PENDING_SETTLE_ALT) {
+                if (hasPendingSettlement(st.state)) {
                     AppLogger.i("蓝牙设备有遗留未结算数据（state=${st.state}），先补结算")
                     val settleResult = settlePending(ble, st, loginCode, telephone)
                     if (settleResult !is SettleOutcome.Uploaded) {
@@ -213,6 +220,8 @@ object BleShowerController {
                     // 重开阀需要一次全新的连接（设备在新连接里才会给出可用的会话参数）。
                     ble.disconnect()
                     return OpenOutcome.Recovered("上笔账单已结清，请重新开启")
+                } else if (st.state != 1) {
+                    return OpenOutcome.Failed("水表返回未识别的状态，开启指令尚未发送")
                 } else if (ShowerController.isRunning(device.snCode)) {
                     // 本地有这台设备的活跃订单 → 是「恢复」场景：上一次没关干净 / App 被杀过，
                     // 设备其实在为自己出水。别当成「别人在用」报错，直接沿用当前会话进入
@@ -242,65 +251,85 @@ object BleShowerController {
                 randomNumber = st.randomNumber
             ) ?: return OpenOutcome.Failed("设备验证失败，请重新登录")
 
-            val resp = NetworkModule.apiService.bluetoothRateOrderSafe(
-                deviceId = device.deviceId.toString(),
-                macAddress = mac,
-                macType = BleSignBuilder.macType(st.devType, st.a1),
-                bigTypeId = (device.bigTypeId ?: 0).toString(),
-                smallTypeId = (device.smallTypeId ?: 0).toString(),
-                protocolType = st.protocolType,
-                randomNumber = st.randomNumber.lowercase(),
-                xfModel = XF_MODEL,
-                signature = signature,
-                auth = NetworkModule.authFields()
-            )
-            if (!resp.success || resp.data == null) {
-                val msg = resp.displayMessage ?: "获取计费信息失败，请重试"
-                AppLogger.w("蓝牙开阀失败：$msg")
-                return OpenOutcome.Failed(msg)
+            val auth = NetworkModule.authFields()
+            NetworkModule.beginRateRequest()
+            val resp = try {
+                NetworkModule.apiService.bluetoothRateOrderSafe(
+                    deviceId = device.deviceId.toString(),
+                    macAddress = mac,
+                    macType = BleSignBuilder.macType(st.devType, st.a1),
+                    bigTypeId = (device.bigTypeId ?: 0).toString(),
+                    smallTypeId = (device.smallTypeId ?: 0).toString(),
+                    protocolType = st.protocolType,
+                    randomNumber = st.randomNumber.lowercase(),
+                    xfModel = XF_MODEL,
+                    signature = signature,
+                    auth = auth
+                )
+            } catch (_: IOException) {
+                return OpenOutcome.Failed("趣智校园计费服务连接失败，开启指令尚未发送。请检查网络并核对官方订单。")
+            } catch (_: JSONException) {
+                return OpenOutcome.Failed("趣智校园计费响应无法读取，开启指令尚未发送。请核对官方订单。")
+            } catch (_: JsonParseException) {
+                return OpenOutcome.Failed("趣智校园计费数据格式异常，开启指令尚未发送。请核对官方订单。")
             }
-
-            val downDataHex = resp.data.downData.orEmpty()
-            val consumeDate = resp.data.consumeDate.orEmpty()
-            val downBytes = BleFrame.fromHex(downDataHex)
-            // 费率包不合法就绝不能往设备里写——写进去的东西不对，后果不是"失败"而是"扣错钱"
-            if (downBytes == null || downBytes.isEmpty()) {
-                AppLogger.e("费率包无效：${downDataHex.take(64)}", null)
-                return OpenOutcome.Failed("获取计费信息失败，请重试")
+            val rate = resp.data
+            if (!resp.success) {
+                val message = resp.displayMessage ?: "趣智校园未完成计费请求"
+                return OpenOutcome.Failed("$message。开启指令尚未发送，请先核对官方订单。")
             }
+            if (rate == null) return OpenOutcome.Failed("趣智校园未返回计费详情，开启指令尚未发送。请先核对官方订单。")
+            val downBytes = BleFrame.fromHex(rate.downData.orEmpty())
 
-            // ④ 写入费率包——这一步真正开阀
             val session = Session(
                 snCode = device.snCode,
                 mac = connectAddress,
                 protocolType = st.protocolType,
                 randomNumber = st.randomNumber,
-                consumeDate = consumeDate,
+                consumeDate = rate.consumeDate.orEmpty(),
                 // 服务端不同学校口径下 orderNo 可能放在 liquidOrderNo 里（实测有学校
                 // 两个都空）。存下来是为了对账/故障恢复时有凭据，空就空着，不强求。
-                orderNo = resp.data.orderNo.orEmpty().ifEmpty { resp.data.liquidOrderNo.orEmpty() }
+                orderNo = rate.orderNo.orEmpty().ifEmpty { rate.liquidOrderNo.orEmpty() }
             )
 
-            NetworkModule.prepareSession(session)
-            val written = ble.writeRate(downBytes)
+            try {
+                NetworkModule.prepareSession(session)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return abortUnsent(session, "用水恢复记录未能保存，开启指令尚未发送")
+            }
+            if (downBytes == null || downBytes.isEmpty()) {
+                return abortUnsent(session, "趣智校园返回的计费数据无效，开启指令尚未发送")
+            }
+            try {
+                NetworkModule.markValveWriteStarted(session)
+            } catch (error: IllegalArgumentException) {
+                return abortUnsent(session, error.message ?: "开启准备失败，开启指令尚未发送")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return abortUnsent(session, "用水恢复记录未能保存，开启指令尚未发送")
+            }
 
-            return if (written) {
-                AppLogger.i("蓝牙开阀成功 orderNo=${session.orderNo}")
-                // ⚠️ 必须在返回成功**之前**落盘活跃订单——上层拿到 Opened 就会启动
-                // ShowerWatchService，服务要读活跃订单构建「使用中」通知。
-                // 蓝牙路径以前漏了这一步（4G 路径在 openValve 里有），
-                // 服务拿到空列表直接 `first()` 崩溃，进程死掉、连接丢失、阀关不了。
-                ShowerController.ensureActiveOrder(device.snCode, session.orderNo, device)
-                OpenOutcome.Opened(session)
-            } else {
-                // 命令发出去了但设备没回确认——**不能当失败**，费率包可能已经写进去了
-                AppLogger.w("费率包已发送但设备未确认，结果未知")
-                OpenOutcome.Unconfirmed("开启结果未确认，请检查是否出水，勿重复开启")
+            return when (ble.writeRate(downBytes)) {
+                RateWriteResult.CONFIRMED -> {
+                    ShowerController.ensureActiveOrder(device.snCode, session.orderNo, device)
+                    OpenOutcome.Opened(session)
+                }
+                RateWriteResult.NOT_SENT -> abortUnsent(session, "蓝牙连接中断，开启指令尚未发送")
+                RateWriteResult.UNCONFIRMED -> OpenOutcome.Unconfirmed("水表尚未确认开启结果，请检查是否出水，勿重复开启")
             }
         } finally {
             // 连接留给结算流程复用（关阀还要用），这里不断开。
             // 会话结束、或判定失败时由调用方 disconnect()。
         }
+    }
+
+    private suspend fun abortUnsent(session: Session, message: String): OpenOutcome.Failed {
+        val detail = if (NetworkModule.resolveUnsentOrder(session)) "$message。已提交失败记录，请在趣智校园核对订单。"
+        else "$message。趣智校园尚未确认订单状态，请先核对或处理该订单。"
+        return OpenOutcome.Failed(detail)
     }
 
     // ════════════════════════════════════════════
@@ -388,13 +417,20 @@ object BleShowerController {
         ble: BleController,
         session: Session,
         loginCode: String,
-        telephone: String
+        telephone: String,
+        alreadyStopped: Boolean = false
     ): SettleOutcome {
+        var stoppedByDevice = alreadyStopped
         // ① 关阀
-        if (!ble.closeValve()) {
+        if (!alreadyStopped && !ble.closeValve()) {
             AppLogger.w("蓝牙关阀未确认")
-            reportFail(loginCode, telephone, session)
-            return SettleOutcome.CloseFailed("关闭设备未确认，请重试")
+            val state = ble.query(timeoutMs = 1_500)?.state
+            if (state == 0) return SettleOutcome.PartialSettlement("设备已停止用水，正在等待官方账单确认。", meterState = 0)
+            if (!hasPendingSettlement(state)) {
+                reportFail(loginCode, telephone, session)
+                return SettleOutcome.CloseFailed("关闭设备未确认，请重试")
+            }
+            stoppedByDevice = true
         }
 
         // ② ⚠️ 关阀后**断开重连**，再走结算。
@@ -426,9 +462,12 @@ object BleShowerController {
             AppLogger.w("关阀重连后读取状态失败")
             return SettleOutcome.PartialSettlement("已关闭，结算待完成；再次连接后重试")
         }
+        if (stoppedByDevice && !hasPendingSettlement(st.state)) {
+            return SettleOutcome.PartialSettlement("设备已停止用水，正在等待官方账单确认。", meterState = st.state.takeIf { it == 0 })
+        }
         AppLogger.i("关阀重连后设备状态：state=${st.state} random=${st.randomNumber}")
         val result = settlePending(ble, st, loginCode, telephone)
-        if (result !is SettleOutcome.Uploaded) {
+        if (result !is SettleOutcome.Uploaded && !stoppedByDevice) {
             reportFail(loginCode, telephone, session)
         }
         return result
@@ -440,16 +479,16 @@ object BleShowerController {
      * 幂等性由服务端保证；本方法**不抛出**——上报失败只记日志，
      * 不能因此把已经关好的阀又"报成失败"。
      */
-    private suspend fun reportFail(loginCode: String, telephone: String, session: Session) {
+    internal suspend fun reportFail(loginCode: String, telephone: String, session: Session): Boolean {
         if (session.consumeDate.isBlank()) {
             AppLogger.w("跳过失败上报：没有 consumeDate（开阀时就没拿到）")
-            return
+            return false
         }
-        try {
+        return try {
             val signature = BleSignBuilder.signFail(loginCode, telephone, session.consumeDate)
             if (signature == null) {
                 AppLogger.w("失败上报签名失败")
-                return
+                return false
             }
             val resp = NetworkModule.apiService.bluetoothFailOrderSafe(
                 consumeDate = session.consumeDate,
@@ -457,8 +496,12 @@ object BleShowerController {
                 auth = NetworkModule.authFields()
             )
             AppLogger.i("失败上报${if (resp.success) "成功" else "被拒：${resp.displayMessage}"}")
-        } catch (t: Throwable) {
+            resp.success
+        } catch (error: CancellationException) {
+            throw error
+        } catch (t: Exception) {
             AppLogger.e("失败上报异常", t)
+            false
         }
     }
 

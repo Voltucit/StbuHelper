@@ -207,7 +207,7 @@ class MainActivity : Activity() {
         }
         val dispatcher = when (method) {
             "refreshHomeworkCourses" -> courseReader
-            "lifeBills", "lifeRefresh", "lifeReceipt" -> walletReader
+            "lifeBills", "lifeRefresh" -> walletReader
             else -> worker
         }
         dispatcher.execute {
@@ -250,12 +250,11 @@ class MainActivity : Activity() {
                         val url = args.getString("url"); require(PortalPolicy.dataUrl(url))
                         runOnUiThread { startActivity(Intent(this, PortalActivity::class.java).putExtra("kind", "tasks").putExtra("url", url)) }; JSONObject()
                     }
-                    "lifeStatus" -> QuzhiManager.status()
+                    "lifeStatus" -> QuzhiManager.pollStatus()
                     "lifeLogin" -> QuzhiManager.login(args.getString("telephone"), args.getString("password"))
                     "lifeLogout" -> QuzhiManager.logout()
                     "lifeRefresh" -> QuzhiManager.refresh()
                     "lifeBills" -> QuzhiManager.bills(args.getString("month"))
-                    "lifeReceipt" -> QuzhiManager.receipt(args.getString("id"))
                     "lifeConfirmReceipt" -> QuzhiManager.confirmReceipt(args.getString("id"))
                     "clearAppBackground" -> { backgrounds.clear(); JSONObject().put("preferences", appPreferences.read()) }
                     "lifeScan" -> runBlocking { QuzhiManager.scan() }
@@ -263,6 +262,7 @@ class MainActivity : Activity() {
                     "lifeBindDevice" -> QuzhiManager.bindDevice(args.getString("mac"), args.getString("kind"))
                     "lifeUnbindDevice" -> QuzhiManager.unbindDevice(args.getString("mac"))
                     "lifeStart" -> runBlocking { QuzhiManager.start(args.getString("mac")) }
+                    "lifeConfirmRateReview" -> runBlocking { QuzhiManager.confirmRateReview() }
                     "lifeConnect" -> runBlocking { QuzhiManager.connect(args.getString("mac")) }
                     "lifeEnd" -> runBlocking { QuzhiManager.disconnectAndEnd(args.optString("mac").takeIf { it.isNotBlank() }) }
                     "lifeStop" -> runBlocking { QuzhiManager.stop(args.optString("mac").takeIf { it.isNotBlank() }) }
@@ -276,7 +276,12 @@ class MainActivity : Activity() {
                     "openPortal" -> {
                         val kind = args.optString("kind", "courses")
                         require(kind in LocalRepository.kinds || kind in setOf("portal", "learning", "school"))
-                        runOnUiThread { startActivity(Intent(this, PortalActivity::class.java).putExtra("kind", kind).putExtra("stayOpen", true)) }
+                        val verificationUrl = if (kind == "learning") AcademicSession(this).learningVerificationUrl() else null
+                        runOnUiThread {
+                            val portal = Intent(this, PortalActivity::class.java).putExtra("kind", kind).putExtra("stayOpen", true)
+                            if (verificationUrl != null) portal.putExtra("url", verificationUrl).putExtra("verifyLearning", true)
+                            startActivity(portal)
+                        }
                         JSONObject().put("opened", true)
                     }
                     "importFile" -> { runOnUiThread { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json"), 101) }; JSONObject() }
@@ -290,10 +295,19 @@ class MainActivity : Activity() {
                 JSONObject().put("ok", true).put("data", result)
             } catch (e: Exception) {
                 // No exception text, URLs or credential-bearing payloads are logged or returned.
-                val message = when (method) {
-                    "saveCredentials" -> "系统密钥库未能保存凭据。密码没有改用其他方式保存，请重试或直接打开学校登录页。"
-                    "bootstrap" -> "本地数据无法读取，请检查手机存储。原文件仍保留在应用内。"
-                    else -> if (e is IllegalArgumentException) e.message ?: "数据格式不正确" else if (method.startsWith("life")) "趣智校园操作未确认完成。请核对设备状态，勿重复开启；可尝试结束并结算。" else "操作未完成，请重试"
+                val message = when {
+                    method == "saveCredentials" -> "系统密钥库未能保存凭据。密码没有改用其他方式保存，请重试或直接打开学校登录页。"
+                    method == "bootstrap" -> "本地数据无法读取，请检查手机存储。原文件仍保留在应用内。"
+                    method == "lifeStart" && QuzhiManager.hasPendingRate -> "趣智校园计费请求尚未确认，请核对官方订单。"
+                    e is IllegalArgumentException -> e.message ?: "数据格式不正确"
+                    method == "lifeStart" && QuzhiManager.hasUnsentOrder -> "开启指令尚未发送，请先处理这笔订单。"
+                    method == "lifeStart" && QuzhiManager.activeSession != null -> "水表开启结果未确认。请检查是否出水，勿重复开启。"
+                    method == "lifeStart" -> "开启准备失败，开启指令尚未发送。请检查连接并核对趣智校园订单。"
+                    method in setOf("lifeStop", "lifeEnd") -> "结束或结算未确认，请核对水表和趣智校园订单。"
+                    method == "lifeConnect" -> "连接蓝牙未完成，请检查蓝牙权限、保持靠近水表后再试。"
+                    method == "lifeBindDevice" || method == "lifeDevice" -> "设备资料暂未读取或保存，请检查网络后重试。"
+                    method.startsWith("life") -> "趣智校园操作未完成，请检查网络或本机状态后重试。"
+                    else -> "操作未完成，请重试"
                 }
                 JSONObject().put("ok", false).put("error", message)
             }

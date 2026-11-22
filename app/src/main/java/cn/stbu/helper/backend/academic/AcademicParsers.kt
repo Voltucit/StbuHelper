@@ -12,7 +12,7 @@ import java.time.*
 import java.time.format.DateTimeFormatter
 
 data class LearningCourse(val id: String, val classId: String, val cpi: String, val name: String, val teacher: String = "")
-data class TaskRecord(val id: String, val name: String, val course: String, val group: String, val status: String, val deadlineAt: Long, val url: String, val deadlineCheckedAt: Long = 0) {
+data class TaskRecord(val id: String, val name: String, val course: String, val group: String, val status: String, val deadlineAt: Long, val url: String, val deadlineCheckedAt: Long = 0, val missingListTime: Boolean = false) {
     fun json() = JSONObject().put("id", id).put("name", name).put("course", course).put("groupId", group).put("status", status)
         .put("deadlineAt", deadlineAt).put("deadline", if (deadlineAt > 0) Instant.ofEpochMilli(deadlineAt).atZone(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) else "截止时间未提供")
         .put("url", url).put("deadlineCheckedAt", deadlineCheckedAt).put("source", "school").put("provider", "learning")
@@ -24,6 +24,12 @@ object AcademicParsers {
     private val absoluteHomeworkDate = Regex(HOMEWORK_DATE)
     private val labelledDeadline = Regex("""(?:截止(?:时间|日期)?|结束(?:时间|日期))\s*:?\s*$HOMEWORK_DATE""")
     private val answerPeriod = Regex("""(?:作答时间|答题时间)\s*:?\s*$HOMEWORK_DATE\s*(?:至|~|～|—|–|-)\s*$HOMEWORK_DATE""")
+    private val noHomework = Regex("""(?:暂无|没有)作业(?!权限|入口|功能)|共\s*0\s*[份个]""")
+    private val emptyHomeworkProgress = Regex("""<span>\s*0\s*/\s*0\s*</span>\s*</div>\s*</div>""", RegexOption.IGNORE_CASE)
+    private val mobileClosed = Regex("""^(?:已完成|已提交|已交|待批阅|已批阅|已作答|已截止|已结束|已过期|已超时|已超期|已逾期|逾期未交|过期未交|无截止时间|截止时间未提供)$""")
+
+    fun confirmsNoHomework(html: String, text: String) =
+        noHomework.containsMatchIn(text) || emptyHomeworkProgress.containsMatchIn(html)
     fun integers(text: String, max: Int): List<Int> {
         val out = linkedSetOf<Int>()
         val clean = text.replace(Regex("[，、]"), ",").replace(Regex("[~～至]"), "-").replace(Regex("[周节第()（）单双\\s]"), "")
@@ -83,9 +89,8 @@ object AcademicParsers {
         return courses
     }
 
-    fun homework(html: String, course: LearningCourse, baseUrl: String, now: Long = System.currentTimeMillis()): List<TaskRecord> {
-        val document = Jsoup.parse(html, baseUrl)
-        return document.select("li[data], li[aria-label]").mapNotNull { item ->
+    fun homework(document: Element, course: LearningCourse, baseUrl: String, now: Long): List<TaskRecord> =
+        document.select("li[data], li[aria-label]").mapNotNull { item ->
             val label = item.attr("aria-label").split(';')
             val title = item.selectFirst(".overHidden2, .right-content .title")?.text()?.trim().orEmpty().ifBlank { label.firstOrNull().orEmpty().trim() }
             if (title.isBlank() || item.selectFirst(".right-content, .overHidden2, .status") == null) return@mapNotNull null
@@ -99,24 +104,51 @@ object AcademicParsers {
             val due = deadlineLabel(item, now).takeIf { it > 0 }
                 ?: labelledTime(statusText, now).takeIf { it > 0 }
                 ?: deadline(timing, now)
-            TaskRecord("work:${course.id}:${course.classId}:$workId", title, course.name, "${course.id}:${course.classId}", status, due, url)
+            // This layout removes .time for expired work but can leave its status as 未交.
+            val missingListTime = due == 0L && timing.isBlank() && pending(status) &&
+                item.`is`("li[onclick*=goTask][data]") && item.selectFirst(".overHidden2") != null &&
+                item.select(".label").none { it.text().contains("互评") }
+            TaskRecord("work:${course.id}:${course.classId}:$workId", title, course.name, "${course.id}:${course.classId}",
+                if (missingListTime) "$status 截止时间未提供" else status, due, url, missingListTime = missingListTime)
         }.distinctBy { it.id }
-    }
-
-    fun mobileHomework(html: String, courses: List<LearningCourse>, baseUrl: String, now: Long): List<TaskRecord> {
+    fun mobileHomework(html: String, courses: List<LearningCourse>, baseUrl: String, now: Long): HomeworkPage {
         val groups = courses.associateBy { "${it.id}:${it.classId}" }
-        return Jsoup.parse(html).select("li[data]").mapNotNull { item ->
-            val status = item.selectFirst(".status")?.text().orEmpty()
-            if (!pending(status)) return@mapNotNull null
-            val title = item.selectFirst("p")?.text().orEmpty()
-            val url = homeworkLink(item.attr("data"), baseUrl)
-            val fields = homeworkQuery(url)
-            val group = "${fields["courseid"]}:${fields["clazzid"] ?: fields["classid"]}"
-            val course = groups[group] ?: return@mapNotNull null
-            val ref = fields["taskrefid"].orEmpty()
-            if (title.isBlank() || ref.isBlank() || fields["type"] != "work") return@mapNotNull null
-            TaskRecord("mobile-work:$group:$ref", title, course.name, group, status, deadlineLabel(item, now), url)
-        }.distinctBy { it.id }
+        val document = Jsoup.parse(html)
+        val text = document.text()
+        if (Regex("无权限|无效的用户|没有此页面访问权限|没有作业权限").containsMatchIn(text)) throw HomeworkPageError("学习通拒绝读取移动端作业")
+        val items = document.select("li[onclick*=goTask]")
+        if (items.isEmpty() && !noHomework.containsMatchIn(text)) throw HomeworkPageError("移动端作业列表格式暂未识别")
+        var complete = true
+        val records = buildList {
+            for (item in items) {
+                val title = item.selectFirst("p")?.text().orEmpty()
+                val url = homeworkLink(item.attr("data"), baseUrl)
+                val fields = homeworkQuery(url)
+                val courseId = fields["courseid"].orEmpty()
+                val classId = (fields["clazzid"] ?: fields["classid"]).orEmpty()
+                if (courseId.isBlank() || classId.isBlank()) { complete = false; continue }
+                val group = "$courseId:$classId"
+                val course = groups[group] ?: continue
+                val ref = fields["taskrefid"].orEmpty()
+                val status = item.selectFirst(".status")?.text().orEmpty().ifBlank {
+                    item.select("[aria-label], span[aria-hidden=true]").asSequence()
+                        .map { node -> node.attr("aria-label").substringAfter("作业状态", "").trim().ifBlank { node.ownText() } }
+                        .firstOrNull { pending(it) || mobileClosed.matches(it) }.orEmpty()
+                }
+                val isPending = pending(status)
+                if (title.isBlank() || ref.isBlank() || fields["type"] != "work" || (!isPending && !mobileClosed.matches(status))) {
+                    complete = false
+                    continue
+                }
+                if (isPending) {
+                    val due = deadlineLabel(item, now)
+                    val remaining = item.selectFirst(".fr")?.text().orEmpty()
+                    val missingListTime = due == 0L && !remaining.contains("剩余")
+                    add(TaskRecord("mobile-work:$group:$ref", title, course.name, group, status, due, url, missingListTime = missingListTime))
+                }
+            }
+        }
+        return HomeworkPage(records.distinctBy { it.id }, baseUrl, complete)
     }
 
     private fun homeworkLink(raw: String, baseUrl: String): String {

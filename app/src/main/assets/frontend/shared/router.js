@@ -139,7 +139,7 @@ async function action(name) {
     'clear-data': () => confirmAction('清除本机学习数据？', '课程、成绩、考试和待办将被删除。建议先导出备份。', async () => { data = M.validate(await Native.call('clearAcademicData')); render(); }),
     'forget-account': () => confirmAction('删除学校凭据？', '删除本机加密保存的学号密码，并清除网页登录会话。学习数据继续保留。', async () => { credential = await Native.call('clearCredentials'); academic.school = false; }),
     'life-login': lifeLogin, 'life-recharge': lifeRecharge, 'life-refresh': () => life.connected ? lifeRefresh() : lifeLogin(), 'life-bills': lifeBills, 'bind-shower': () => lifeDevices('shower'), 'bind-drinking': () => lifeDevices('drinking'),
-    'life-end-active': () => finishWater(),
+    'life-end-active': () => finishWater(), 'life-review-rate': reviewRateOrder,
     'life-logout': () => confirmAction('退出趣智校园？', '请先结束正在使用的水表并完成结算。', async () => { life = await Native.call('lifeLogout'); clearRechargeReturn(); lifeSnapshot = null; lastSettlement = null; }),
     privacy: () => sheet('隐私与数据', '<div class="policy"><p>账号凭据或会话只使用系统安全存储。Android 使用 Keystore，iOS 使用本机钥匙串。</p><p>学校与学习通登录、数据同步直接访问各自官方服务。趣智校园使用自己的账号，手机直接访问其官方接口；学校密码不会发给趣智校园。</p><p>趣智校园密码只在登录请求期间使用，登录令牌另行加密保存在本机。学习数据保存在应用私有目录，应用禁止云备份和设备迁移。</p><p>本应用不包含广告、使用统计或开发者代理服务器。备份文件不包含账号密码、会话 Cookie、趣智校园令牌或带签名的作业链接。</p><p>学校官方页面可能自行加载第三方资源。登录页与本地应用界面分开，官方网页没有调用本机密钥库的桥接权限。</p></div>'),
     credits: () => sheet('开源项目', '<div class="policy"><p>趣智校园协议参考 LinYu（MIT）：https://github.com/yehu-imei/linyu。</p><p>学习通课表和作业查询参考 xuexitong-cli（MIT）；成绩与考试参考公开正方查询协议。接口和真机行为由用户验证。</p><p>产品功能参考航院通（MIT）。本项目没有使用其服务器或遥测功能。</p><p>完整许可与来源见项目 THIRD_PARTY_NOTICES.md。</p></div>')

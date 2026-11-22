@@ -42,7 +42,7 @@ private struct CampusTimeline: TimelineProvider {
         let saved = (data[key] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let message = saved.isEmpty ? CampusEntry.defaultMessage(homework: homework) : saved
         let tasks = homework
-            ? CampusProjection.pending(data["tasks"] as? [[String: Any]] ?? [], at: now).filter { $0.date < midnight } : []
+            ? CampusProjection.pending(data["tasks"] as? [[String: Any]] ?? [], at: now) : []
         let courses = homework ? [] : CampusProjection.todayCourses(data, at: now)
         let courseChanges = courses.flatMap { [$0.item.date] + ($0.endsAt.map { [$0] } ?? []) }
         let dates = Set(tasks.map(\.date) + courseChanges).filter { $0 > now && $0 < midnight }.sorted()
@@ -50,7 +50,7 @@ private struct CampusTimeline: TimelineProvider {
         let lastChange = dates.last.flatMap { changeTimes.last == $0 ? nil : $0 }
         return ([now] + changeTimes + (lastChange.map { [$0] } ?? [])).map { date in
             if homework {
-                let remaining = tasks.filter { $0.date > date }
+                let remaining = tasks.drop(while: { $0.date <= date })
                 return CampusEntry(date: date, homework: true, item: remaining.first, courseEnd: nil,
                                    count: remaining.count, emptyMessage: message)
             }
@@ -84,10 +84,26 @@ private struct CampusWidgetView: View {
         let time: String
         if let courseEnd = entry.courseEnd {
             time = CampusProjection.format(courseEnd, "HH:mm") + " 下课"
+        } else if entry.homework {
+            time = homeworkDeadline(item.date)
         } else {
-            time = CampusProjection.format(item.date, "HH:mm") + (entry.homework ? " 截止" : "")
+            time = CampusProjection.format(item.date, "HH:mm")
         }
         return [time, item.detail].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    private func homeworkDeadline(_ deadline: Date) -> String {
+        let calendar = CampusProjection.calendar
+        let day: String
+        if calendar.isDate(deadline, inSameDayAs: entry.date) {
+            day = "今天"
+        } else if calendar.isDate(deadline, inSameDayAs: CampusProjection.nextMidnight(after: entry.date)) {
+            day = "明天"
+        } else {
+            let sameYear = calendar.isDate(deadline, equalTo: entry.date, toGranularity: .year)
+            day = CampusProjection.format(deadline, sameYear ? "M月d日" : "yyyy年M月d日")
+        }
+        return "\(day) \(CampusProjection.format(deadline, "HH:mm")) 截止"
     }
 
     private var itemContent: some View {
@@ -155,7 +171,7 @@ private struct CampusWidget: Widget {
             CampusWidgetView(entry: entry)
         }
         .configurationDisplayName(homework ? "未完成作业" : "下一节课")
-        .description(homework ? "显示今天截止的未交作业。" : "显示今天的下一节课、时间和教室。")
+        .description(homework ? "显示追踪课程中最早截止的未交作业。" : "显示今天的下一节课、时间和教室。")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }

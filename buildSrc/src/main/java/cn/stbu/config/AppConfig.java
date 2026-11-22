@@ -6,7 +6,7 @@ public final class AppConfig {
     public static final String APP_NAME = "川工商小助手";
 
     /** 对用户显示的软件版本。 */
-    public static final String VERSION_NAME = "0.3.5";
+    public static final String VERSION_NAME = "0.4.1";
 
     /** Android 内部版本号：发布新版本时递增。 */
     public static final int VERSION_CODE = 2;

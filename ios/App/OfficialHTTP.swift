@@ -22,6 +22,10 @@ enum CampusProvider: String, CaseIterable {
 
 struct SessionExpired: Error {}
 
+struct LearningRateLimited: LocalizedError {
+    var errorDescription: String? { "学习通限制了请求频率，请稍后再同步" }
+}
+
 struct PortalCookie: Codable, Equatable {
     let name: String
     let value: String
@@ -82,6 +86,7 @@ final class OfficialHTTP {
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }()
     private var nextRequest = [String: Date]()
+    private var learningBlockedUntil = Date.distantPast
     private var portalGeneration = [CampusProvider: Int]()
 
     static func form(_ fields: [String: String]) -> String {
@@ -93,6 +98,8 @@ final class OfficialHTTP {
     }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let learning = CampusProvider.learning.owns(request.url?.host?.lowercased() ?? "")
+        if learning && Date() < learningBlockedUntil { throw LearningRateLimited() }
         if let host = request.url?.host {
             let now = Date()
             let start = max(now, nextRequest[host] ?? now)
@@ -100,9 +107,14 @@ final class OfficialHTTP {
             let wait = start.timeIntervalSince(now)
             if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         }
+        if learning && Date() < learningBlockedUntil { throw LearningRateLimited() }
         let (bytes, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AppError("服务未返回数据") }
         if http.statusCode == 429 {
+            if learning {
+                learningBlockedUntil = Date().addingTimeInterval(60)
+                throw LearningRateLimited()
+            }
             if let host = request.url?.host { nextRequest[host] = Date().addingTimeInterval(60) }
             throw AppError("请求较频繁，请稍后再同步")
         }

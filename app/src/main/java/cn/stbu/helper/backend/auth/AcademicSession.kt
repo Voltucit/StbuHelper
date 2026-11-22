@@ -51,6 +51,26 @@ class AcademicSession(context: Context) {
         val existing = CookieManager.getInstance().getCookie(PortalPolicy.LEARNING_HOME).orEmpty()
         val learning = if (state.contains("learning.connected")) state.getBoolean("learning.connected", false) else Regex("(?:^|;)\\s*(?:_uid|UID|PUID)=").containsMatchIn(existing)
         return JSONObject().put("learning", learning).put("school", state.getBoolean("school.connected", false))
+            .put("learningVerificationRequired", isLearningVerificationRequired())
+    }
+
+    fun isLearningVerificationRequired() = state.getBoolean("learning.verificationRequired", false)
+
+    internal fun requireLearningVerification(url: String) = synchronized(lock) {
+        ensureRequestSession("learning")
+        if (learningVerificationPage == null) learningVerificationPage = url
+        state.edit().putBoolean("learning.verificationRequired", true).apply()
+    }
+
+    fun learningVerificationUrl(): String? = synchronized(lock) {
+        if (isLearningVerificationRequired()) learningVerificationPage
+            ?: "https://mooc1.chaoxing.com/mooc-ans/work/stu-work?ut=s"
+        else null
+    }
+
+    fun clearLearningVerification() = synchronized(lock) {
+        learningVerificationPage = null
+        state.edit().remove("learning.verificationRequired").apply()
     }
 
     fun restoreAccountCaches() {
@@ -104,11 +124,15 @@ class AcademicSession(context: Context) {
         }
         vault.saveJson("academic.sessions", JSONObject().put("cookies", saved))
         mark(provider, false)
-        if (provider == "learning") HomeworkReminders.cancelNotice(app)
+        if (provider == "learning") {
+            clearLearningVerification()
+            HomeworkReminders.cancelNotice(app)
+        }
     }
 
     companion object {
         private val lock = Any()
+        private var learningVerificationPage: String? = null
         private val sessionGenerations = mapOf("learning" to AtomicLong(), "school" to AtomicLong())
 
         internal fun beginLogin(provider: String) { sessionGenerations.getValue(provider).incrementAndGet() }

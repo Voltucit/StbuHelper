@@ -1,18 +1,30 @@
 package cn.stbu.helper
 
 import cn.stbu.helper.backend.academic.AcademicParsers
+import cn.stbu.helper.backend.academic.AcademicHttp
+import cn.stbu.helper.backend.academic.LearningCourse
 import cn.stbu.helper.backend.auth.PortalPolicy
 import cn.stbu.helper.backend.homework.HomeworkReminderPlan
 import cn.stbu.helper.backend.homework.ReminderTask
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.Instant
 
 /** User-owned validation cases; the agent does not execute tests in this project. */
 class AcademicRulesTest {
+    @Test fun learningOperationRestrictionIsDistinctFromAnOrdinaryCoursePage() {
+        assertTrue(AcademicHttp.isLearningVerificationPage("<h1>操作限制</h1><label>请输入验证码</label>"))
+        assertTrue(AcademicHttp.isLearningVerificationPage("<div>9010 请填写验证码</div>"))
+        assertFalse(AcademicHttp.isLearningVerificationPage("<h1>课程作业</h1><script>var hint='操作限制，请输入验证码';</script>"))
+        assertFalse(AcademicHttp.isLearningVerificationPage("<label>请输入验证码以登录</label>"))
+        assertTrue(AcademicHttp.isLearningVerificationUrl("https://mooc1.chaoxing.com/antispider/check"))
+        assertFalse(AcademicHttp.isLearningVerificationUrl("https://i.chaoxing.com.example/antispider/check"))
+    }
+
     @Test fun oauthAndHttpCallbacksUseSeparateNavigationPolicy() {
         assertEquals(PortalPolicy.Action.INTERNAL, PortalPolicy.classify("https://open.weixin.qq.com/connect/qrconnect"))
         assertEquals(PortalPolicy.Action.INTERNAL, PortalPolicy.classify("https://graph.qq.com/oauth2.0/show"))
@@ -44,6 +56,36 @@ class AcademicRulesTest {
         val html = "<div>作答时间：12-28 10:00 至 01-02 23:59</div><p>题目：2000-01-01 00:00 发生了什么？</p>"
         assertEquals(Instant.parse("2027-01-02T15:59:00Z").toEpochMilli(), AcademicParsers.detailDeadline(html, now))
         assertEquals(0, AcademicParsers.deadline("剩余 2 天", now))
+    }
+
+    @Test fun desktopWorkWithoutListTimeDoesNotBlockTheSync() {
+        val now = Instant.parse("2026-11-18T00:00:00Z").toEpochMilli()
+        val course = LearningCourse("10", "20", "30", "数学")
+        val page = Jsoup.parse("""
+            <ul>
+              <li onclick="goTask(this);" data="/work/task?workId=1">
+                <p class="overHidden2">过期作业</p><span class="status">未交</span>
+              </li>
+              <li onclick="goTask(this);" data="/work/task?workId=2">
+                <p class="overHidden2">本周作业</p><span class="status">未交</span>
+                <span aria-label="截止时间11月25日20时30分"></span>
+              </li>
+              <li onclick="goTask(this);" data="/work/task?workId=3">
+                <p class="overHidden2">待查作业</p><span class="status">未交</span>
+                <span class="time">剩余3天</span>
+              </li>
+              <li onclick="goTask(this);" data="/work/task?workId=4">
+                <p class="overHidden2">互评作业</p><span class="status">未交</span><span class="label">互评</span>
+              </li>
+            </ul>
+        """.trimIndent())
+        val (expired, active, needsDetail, peerReview) = AcademicParsers.homework(page, course, "https://mooc1.chaoxing.com/mooc2/work/list", now)
+        assertTrue(expired.missingListTime)
+        assertFalse(AcademicParsers.pending(expired.status))
+        assertTrue(AcademicParsers.actionable(active.status, active.deadlineAt, now))
+        assertTrue(AcademicParsers.pending(needsDetail.status))
+        assertEquals(0L, needsDetail.deadlineAt)
+        assertTrue(AcademicParsers.pending(peerReview.status))
     }
     @Test fun gradeAndExamFieldsUseSchoolJson() {
         val rows = JSONArray().put(JSONObject().put("kcmc", "数学").put("cj", "85").put("xf", "4").put("kch_id", "M01").put("xnm", "2026").put("xqm", "3"))

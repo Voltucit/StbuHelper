@@ -6,7 +6,10 @@ const Native = window.Native = {
     if (!this.android) return this.preview(method, args);
     return new Promise((resolve, reject) => {
       const id = ++this.serial;
-      const timeout = ['editLocalText', 'lifeRecharge', 'chooseAppBackground'].includes(method) ? null : setTimeout(() => { this.pending.delete(id); reject(new Error('操作仍未确认完成，请先核对当前状态再重试')); }, method === 'lifeScanCode' ? 180000 : method.startsWith('life') ? 90000 : method === 'refreshHomeworkCourses' ? 45000 : 20000);
+      const timeout = ['editLocalText', 'lifeRecharge', 'chooseAppBackground'].includes(method) ? null : setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(method === 'lifeStart' ? '开启结果尚未返回，请先核对水表和趣智校园官方订单。' : '操作仍未确认完成，请先核对当前状态再重试'));
+      }, method === 'lifeScanCode' ? 180000 : method.startsWith('life') ? 90000 : method === 'refreshHomeworkCourses' ? 45000 : 20000);
       this.pending.set(id, { resolve, reject, timeout });
       window.StbuNative.call(id, method, JSON.stringify(args));
     });
