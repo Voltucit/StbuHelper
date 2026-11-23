@@ -183,4 +183,6 @@ Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($keystor
 
 代理只修改源码、配置和必要文档。所有构建、APK 输出、签名、测试、预览、真实登录和蓝牙设备验收均由用户亲自进行，详见 [AGENTS.md](AGENTS.md) 和 [agent.md](agent.md)。本次清理未构建、未测试，未生成新 APK；不能把历史验证记录当作当前版本的验证结果。
 
+项目贡献记录见 [贡献者名单](CONTRIBUTORS.md)。
+
 开源来源与许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
