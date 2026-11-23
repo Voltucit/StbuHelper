@@ -21,5 +21,15 @@ function weekView() {
     table += '</tr>';
   }
   table += '</tbody></table>';
-  return `<div class="week-toolbar"><button class="icon-button" data-action="prev-week" aria-label="上一周">‹</button><select id="week-select" aria-label="选择教学周">${Array.from({ length: 60 }, (_, i) => `<option value="${i + 1}" ${i + 1 === week ? 'selected' : ''}>第 ${i + 1} 周</option>`).join('')}</select><button class="icon-button" data-action="next-week" aria-label="下一周">›</button><button class="secondary current-week" data-action="current-week">回到本周</button></div><div class="table-scroll" tabindex="0" role="region" aria-label="整周课表，可横向滚动">${table}</div><div class="section-row"><p class="fine">${courses.length} 条课程安排 · 点击课程查看详情</p><button class="text-button" data-action="add-course">添加课程</button></div>${!courses.length ? academic.learning ? empty('这一周没有课程', '') : empty('还没有课表', '连接学习通后自动同步。', 'open-learning', '连接学习通') : ''}${!periods.length ? '<p class="fine">尚无上课时间，可在“我的 → 设置 → 学期与作息”中设置。</p>' : ''}${footer()}`;
+  const legacy = !data.settings.schoolTerm && data.courses.some(c => c.source !== 'manual');
+  let note = '';
+  if (legacy) note = '<p class="fine">当前显示旧版缓存课表。<button class="text-button" data-action="import-courses">同步教务课表</button></p>';
+  else if (data.settings.schoolTerm && !data.settings.semesterStart) note = '<p class="fine">教务系统暂未提供教学周。<button class="text-button" data-action="settings">设置开学日期</button></p>';
+  let message = '';
+  if (!courses.length) {
+    if (data.settings.schoolTerm || data.courses.length) message = empty('这一周没有课程', '');
+    else if (academic.school) message = empty('教务课表待同步', syncState.scheduleIssue || '', 'import-courses', '同步课表');
+    else message = empty('还没有课表', '连接学校教务账号后同步个人课表。', 'open-school', '连接学校教务账号');
+  }
+  return `<div class="week-toolbar"><button class="icon-button" data-action="prev-week" aria-label="上一周">‹</button><select id="week-select" aria-label="选择教学周">${Array.from({ length: 60 }, (_, i) => `<option value="${i + 1}" ${i + 1 === week ? 'selected' : ''}>第 ${i + 1} 周</option>`).join('')}</select><button class="icon-button" data-action="next-week" aria-label="下一周">›</button><button class="secondary current-week" data-action="current-week">回到本周</button></div><div class="table-scroll" tabindex="0" role="region" aria-label="整周课表，可横向滚动">${table}</div><div class="section-row"><p class="fine">${courses.length} 条课程安排 · 点击课程查看详情</p><button class="text-button" data-action="add-course">添加课程</button></div>${note}${message}${!periods.length ? '<p class="fine">尚无上课时间，可在“我的 → 设置 → 学期与作息”中设置。</p>' : ''}${footer()}`;
 }

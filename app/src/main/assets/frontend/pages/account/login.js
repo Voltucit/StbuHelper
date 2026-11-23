@@ -11,7 +11,7 @@ function cancelAccountLogin() {
 function schoolAccount() { return openAccount('school'); }
 
 function connect() {
-  sheet('连接校园账号', `<p class="fine">在 App 内输入账号登录。会话有效时自动复用；只有主动选择时才打开官方网页。</p><div class="menu-list">${menu('学习通', academic.learning ? '已连接 · 课表和作业' : '使用手机号或超星号登录', 'open-learning')}${menu('学校教务系统', academic.school ? '已连接 · 考试和成绩' : '使用四川工商学院学号登录', 'open-school')}</div>`);
+  sheet('连接校园账号', `<p class="fine">在 App 内输入账号登录。会话有效时自动复用；只有主动选择时才打开官方网页。</p><div class="menu-list">${menu('学习通', academic.learning ? '已连接 · 课程作业' : '使用手机号或超星号登录', 'open-learning')}${menu('学校教务系统', academic.school ? '已连接 · 课表、考试和成绩' : '使用四川工商学院学号登录', 'open-school')}</div>`);
 }
 
 function logoutAccount(provider) { confirmAction('退出这个账号？', '删除本机保存的对应登录会话，学习数据继续保留。', async () => { academic = await Native.call('academicLogout', { provider }); }); }
@@ -21,7 +21,7 @@ async function openOfficialAccount(provider) { closeSheet(); await Native.call('
 async function openAccount(provider) {
   const title = provider === 'school' ? '学校教务账号' : '学习通账号';
   if (academic[provider]) {
-    sheet(title, `<p>账号已连接，会话有效时无需再次登录。</p><button class="primary wide" data-action="import-${provider === 'school' ? 'grades' : 'courses'}">同步数据</button><button class="secondary wide" data-action="official-${provider}">打开官方网页</button><button class="text-button wide" data-action="logout-${provider}">退出本机账号</button>`); return;
+    sheet(title, `<p>账号已连接，会话有效时无需再次登录。</p><button class="primary wide" data-action="import-${provider}">同步数据</button><button class="secondary wide" data-action="official-${provider}">打开官方网页</button><button class="text-button wide" data-action="logout-${provider}">退出本机账号</button>`); return;
   }
   if (Native.ios) {
     sheet(title, '<p class="fine">在 App 内打开官方登录页。会话由 iOS 钥匙串保存在本机。</p><button class="primary wide" data-action="official-' + provider + '">登录账号</button>');

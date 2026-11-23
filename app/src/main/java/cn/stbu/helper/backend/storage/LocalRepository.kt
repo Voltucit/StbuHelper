@@ -61,7 +61,6 @@ class LocalRepository(context: Context, private val account: Pair<String, String
 
     /** Archive the outgoing account before atomically publishing the incoming one. */
     fun selectAccount(provider: String, owner: String, adoptLegacy: Boolean): Boolean = synchronized(lock) {
-        val collections = if (provider == "learning") listOf("courses", "tasks") else listOf("grades", "exams")
         val document = readDocument()
         val current = owners(document)
         val previous = current.optString(provider)
@@ -70,36 +69,8 @@ class LocalRepository(context: Context, private val account: Pair<String, String
         if (previous.isNotEmpty() || !adoptLegacy) {
             check(archives.isDirectory || archives.mkdirs()) { "无法创建账号缓存目录" }
             val destination = archive(provider, previous.ifEmpty { "legacy" })
-            val outgoing = JSONObject()
             val incoming = readFile(archive(provider, owner))
-            for (kind in collections) {
-                val rows = document.getJSONArray(kind)
-                val local = mutableListOf<JSONObject>()
-                val synced = mutableListOf<JSONObject>()
-                for (i in 0 until rows.length()) {
-                    val row = rows.getJSONObject(i)
-                    if (row.optString("source") == "manual") local.add(row) else synced.add(row)
-                }
-                outgoing.put(kind, JSONArray(synced))
-                val retained = incoming?.optJSONArray(kind) ?: JSONArray()
-                val manualIds = local.mapTo(mutableSetOf()) { it.optString("id") }
-                for (i in 0 until retained.length()) {
-                    val row = retained.getJSONObject(i)
-                    if (row.optString("id") !in manualIds) local.add(row)
-                }
-                document.put(kind, JSONArray(local))
-            }
-            if (provider == "learning") {
-                val settings = document.getJSONObject("settings")
-                val saved = JSONObject()
-                for (key in CALENDAR_KEYS) {
-                    if (key != "officialTimes" && settings.optBoolean("customTimetable")) continue
-                    settings.remove(key)?.let { saved.put(key, it) }
-                    incoming?.optJSONObject("settings")?.opt(key)?.let { settings.put(key, it) }
-                }
-                outgoing.put("settings", saved)
-            }
-            writeFile(destination, outgoing)
+            writeFile(destination, swapAccountData(document, provider, incoming))
         }
         document.put(OWNERS, current.put(provider, owner)).put("updatedAt", java.time.Instant.now().toString())
         writeFile(file, document)
@@ -133,7 +104,7 @@ class LocalRepository(context: Context, private val account: Pair<String, String
         records.length()
     }
 
-    fun applyRemote(provider: String, kind: String, records: JSONArray, complete: Boolean, groups: Set<String> = emptySet(), refreshedWeeks: Set<Int> = emptySet()) = synchronized(lock) {
+    fun applyRemote(provider: String, kind: String, records: JSONArray, complete: Boolean, groups: Set<String> = emptySet()) = synchronized(lock) {
         require(kind in kinds)
         val document = read()
         val old = document.getJSONArray(kind)
@@ -143,31 +114,20 @@ class LocalRepository(context: Context, private val account: Pair<String, String
             val sameProvider = item.optString("provider") == provider && item.optString("source") != "manual"
             val legacy = item.optString("provider").isBlank() && item.optString("source") == "school"
             if ((sameProvider && (complete || item.optString("groupId") in groups)) || legacy && complete) continue
-            if (sameProvider && kind == "courses" && refreshedWeeks.isNotEmpty() && item.optString("source") != "manual") {
-                val weeks = item.getJSONArray("weeks")
-                val remaining = (0 until weeks.length()).map { weeks.getInt(it) }.filter { it !in refreshedWeeks }
-                if (remaining.isEmpty()) continue
-                item.put("weeks", JSONArray(remaining))
-            }
             merged[item.optString("id", "old:$i")] = item
         }
         for (i in 0 until records.length()) {
             val item = records.getJSONObject(i)
             if (merged[item.getString("id")]?.optString("source") == "manual") continue
-            if (!complete && kind == "courses") {
-                val previous = merged[item.getString("id")]?.optJSONArray("weeks")
-                if (previous != null) item.put("weeks", JSONArray(((0 until previous.length()).map { previous.getInt(it) } + (0 until item.getJSONArray("weeks").length()).map { item.getJSONArray("weeks").getInt(it) }).distinct().sorted()))
-            }
             merged[item.getString("id")] = item.put("provider", provider).put("source", "school")
         }
         document.put(kind, JSONArray(merged.values.toList())).put("updatedAt", java.time.Instant.now().toString())
         write(document)
     }
 
-    fun mergeSettings(incoming: JSONObject) = synchronized(lock) {
+    fun replaceTimetable(courses: JSONArray, incoming: JSONObject) = synchronized(lock) {
         val document = read()
-        val settings = document.getJSONObject("settings")
-        for (key in incoming.keys()) if (!settings.optBoolean("customTimetable", false) || key != "semesterStart") settings.put(key, incoming.get(key))
+        applyTimetable(document, courses, incoming)
         document.put("updatedAt", java.time.Instant.now().toString())
         write(document)
     }
@@ -208,12 +168,72 @@ class LocalRepository(context: Context, private val account: Pair<String, String
     companion object {
         private val lock = Any()
         private const val OWNERS = "_academicOwners"
-        private val CALENDAR_KEYS = listOf("semesterStart", "teachingWeeks", "officialTimes")
+        private val CALENDAR_KEYS = listOf("schoolTerm", "semesterStart", "teachingWeeks", "officialTimes")
         private val SYNC_KEYS = listOf("scheduleSignature", "lastSchedule", "lastHomeworkSync")
         const val MAX_BYTES = 2 * 1024 * 1024
         val kinds = setOf("courses", "grades", "exams", "tasks")
         fun empty() = JSONObject().put("schemaVersion", 1).put("settings", JSONObject()).put("courses", JSONArray())
             .put("grades", JSONArray()).put("exams", JSONArray()).put("tasks", JSONArray()).put("updatedAt", "").put("demo", false)
+
+        internal fun swapAccountData(document: JSONObject, provider: String, incoming: JSONObject?): JSONObject {
+            val outgoing = JSONObject()
+            val settings = document.getJSONObject("settings")
+            val savedSettings = incoming?.optJSONObject("settings")
+            // On upgrade the old timetable still belongs to Learning until School supplies its first complete term.
+            val schoolTimetable = settings.has("schoolTerm")
+            val archiveCalendar = if (provider == "school") schoolTimetable else !schoolTimetable
+            val restoreCalendar = if (provider == "school") savedSettings?.has("schoolTerm") == true else !schoolTimetable
+            val calendar = archiveCalendar || restoreCalendar
+            val collections = if (provider == "learning") mutableListOf("tasks") else mutableListOf("grades", "exams")
+            if (calendar) collections.add("courses")
+            for (kind in collections) {
+                val rows = document.getJSONArray(kind)
+                val local = mutableListOf<JSONObject>()
+                val synced = mutableListOf<JSONObject>()
+                for (i in 0 until rows.length()) {
+                    val row = rows.getJSONObject(i)
+                    if (row.optString("source") == "manual") local.add(row) else synced.add(row)
+                }
+                if (kind != "courses" || archiveCalendar) outgoing.put(kind, JSONArray(synced))
+                val retained = if (kind != "courses" || restoreCalendar) incoming?.optJSONArray(kind) else null
+                val manualIds = local.mapTo(mutableSetOf()) { it.optString("id") }
+                if (retained != null) {
+                    for (i in 0 until retained.length()) {
+                        val row = retained.getJSONObject(i)
+                        if (row.optString("id") !in manualIds) local.add(row)
+                    }
+                }
+                document.put(kind, JSONArray(local))
+            }
+            if (calendar) {
+                val saved = JSONObject()
+                for (key in CALENDAR_KEYS) {
+                    if (key == "semesterStart" && settings.optBoolean("customTimetable")) continue
+                    settings.remove(key)?.let { saved.put(key, it) }
+                    if (restoreCalendar) savedSettings?.opt(key)?.let { settings.put(key, it) }
+                }
+                if (archiveCalendar) outgoing.put("settings", saved)
+            }
+            return outgoing
+        }
+
+        internal fun applyTimetable(document: JSONObject, courses: JSONArray, incoming: JSONObject) {
+            val old = document.getJSONArray("courses")
+            val manual = (0 until old.length()).map(old::getJSONObject).filter { it.optString("source") == "manual" }
+            val ids = manual.mapTo(mutableSetOf()) { it.optString("id") }
+            val merged = JSONArray(manual)
+            for (i in 0 until courses.length()) {
+                val course = courses.getJSONObject(i)
+                if (course.getString("id") !in ids) merged.put(course)
+            }
+            val settings = document.getJSONObject("settings")
+            val newTerm = settings.optString("schoolTerm") != incoming.getString("schoolTerm")
+            for (key in CALENDAR_KEYS) {
+                if (key == "semesterStart" && settings.optBoolean("customTimetable")) continue
+                if (incoming.has(key)) settings.put(key, incoming.get(key)) else if (newTerm) settings.remove(key)
+            }
+            document.put("courses", merged)
+        }
 
         fun validate(value: JSONObject) {
             require(value.optInt("schemaVersion") == 1) { "请选择 StbuHelper 导出的 JSON 文件" }

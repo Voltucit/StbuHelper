@@ -30,50 +30,6 @@ object AcademicParsers {
 
     fun confirmsNoHomework(html: String, text: String) =
         noHomework.containsMatchIn(text) || emptyHomeworkProgress.containsMatchIn(html)
-    fun integers(text: String, max: Int): List<Int> {
-        val out = linkedSetOf<Int>()
-        val clean = text.replace(Regex("[，、]"), ",").replace(Regex("[~～至]"), "-").replace(Regex("[周节第()（）单双\\s]"), "")
-        for (piece in clean.split(',')) {
-            val match = Regex("^(\\d+)(?:-(\\d+))?$").find(piece) ?: continue
-            val a = match.groupValues[1].toIntOrNull() ?: continue
-            val b = match.groupValues[2].toIntOrNull() ?: a
-            if (a !in 1..max || b !in a..max) continue
-            (a..b).filterTo(out) { (!text.contains("单") || it % 2 == 1) && (!text.contains("双") || it % 2 == 0) }
-        }
-        return out.sorted()
-    }
-
-    fun lessons(array: JSONArray, week: Int): List<JSONObject> = buildList {
-        for (i in 0 until array.length()) {
-            val row = array.optJSONObject(i) ?: continue
-            val day = row.optInt("dayOfWeek")
-            val first = row.optInt("beginNumber")
-            val length = row.optInt("length")
-            if (day !in 1..7 || first !in 1..16 || length !in 1..16 || first + length - 1 > 16 || row.optString("name").isBlank()) continue
-            val key = listOf(row.optString("lessonId"), row.optString("name"), day, first, length, row.optString("location"), row.optString("teacherName")).joinToString("|")
-            add(JSONObject().put("id", "cx:$key").put("name", row.getString("name")).put("day", day).put("sections", JSONArray((first until first + length).toList()))
-                .put("weeks", JSONArray(listOf(week))).put("room", row.optString("location")).put("teacher", row.optString("teacherName")).put("source", "school").put("provider", "learning"))
-        }
-    }
-
-    fun curriculumSettings(curriculum: JSONObject): JSONObject {
-        val out = JSONObject()
-        val start = curriculum.optLong("firstWeekDate").takeIf { it > 0 } ?: curriculum.optLong("firstWeekDateReal")
-        if (start > 0) out.put("semesterStart", Instant.ofEpochMilli(start).atZone(zone).toLocalDate().toString())
-        out.put("teachingWeeks", curriculum.optInt("maxWeek", 30).coerceIn(1, 60))
-        val times = curriculum.optJSONArray("lessonTimeConfigArray")
-        val normalized = if (times == null) emptyList() else (0 until times.length()).mapNotNull { i ->
-            val m = Regex("^(\\d{1,2}):([0-5]\\d)\\s*[-–—~～至]\\s*(\\d{1,2}):([0-5]\\d)$").find(times.optString(i).trim().replace('：', ':')) ?: return@mapNotNull null
-            try {
-                val first = LocalTime.of(m.groupValues[1].toInt(), m.groupValues[2].toInt())
-                val last = LocalTime.of(m.groupValues[3].toInt(), m.groupValues[4].toInt())
-                if (first >= last) null else first.format(DateTimeFormatter.ofPattern("HH:mm")) + "-" + last.format(DateTimeFormatter.ofPattern("HH:mm"))
-            } catch (_: Exception) { null }
-        }
-        if (normalized.isNotEmpty() && times?.length() == normalized.size) out.put("officialTimes", normalized.joinToString("\n"))
-        return out
-    }
-
     fun learningCourses(json: JSONObject): List<LearningCourse> {
         val channels = json.optJSONArray("channelList") ?: throw IllegalStateException("学习通课程列表格式发生变化")
         val courses = (0 until channels.length()).mapNotNull { i ->

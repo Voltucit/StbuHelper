@@ -17,7 +17,7 @@ extension Dictionary where Key == String, Value == Any {
 final class CampusStore {
     static let collections = ["courses", "tasks", "grades", "exams"]
     private static let ownersKey = "_academicOwners"
-    private static let calendarKeys = ["semesterStart", "teachingWeeks", "officialTimes"]
+    private static let calendarKeys = ["schoolTerm", "semesterStart", "teachingWeeks", "officialTimes"]
     static var empty: Object {
         ["schemaVersion": 1, "settings": Object(), "courses": [Object](), "tasks": [Object](),
          "grades": [Object](), "exams": [Object](), "updatedAt": "", "demo": false]
@@ -97,25 +97,31 @@ final class CampusStore {
         let previous = owners[provider.rawValue]
         if previous == owner { return false }
         if previous != nil || !adoptLegacy {
-            let kinds = provider == .learning ? ["courses", "tasks"] : ["grades", "exams"]
             try FileManager.default.createDirectory(at: archives, withIntermediateDirectories: true)
             let incoming = try readFile(archive(provider, owner: owner)) ?? [:]
             var outgoing: Object = [:]
+            var rules = value["settings"] as? Object ?? [:]
+            let savedRules = incoming["settings"] as? Object ?? [:]
+            // Old Learning snapshots remain usable until a complete School timetable is available.
+            let schoolTimetable = rules["schoolTerm"] != nil
+            let archiveCalendar = provider == .school ? schoolTimetable : !schoolTimetable
+            let restoreCalendar = provider == .school ? savedRules["schoolTerm"] != nil : !schoolTimetable
+            let calendar = archiveCalendar || restoreCalendar
+            var kinds = provider == .learning ? ["tasks"] : ["grades", "exams"]
+            if calendar { kinds.append("courses") }
             for kind in kinds {
                 let rows = value.rows(kind)
-                outgoing[kind] = rows.filter { $0.text("source") != "manual" }
-                replace(kind, rows: incoming.rows(kind), in: &value)
+                if kind != "courses" || archiveCalendar { outgoing[kind] = rows.filter { $0.text("source") != "manual" } }
+                replace(kind, rows: kind != "courses" || restoreCalendar ? incoming.rows(kind) : [], in: &value)
             }
-            if provider == .learning {
-                var settings = value["settings"] as? Object ?? [:]
-                let expected = incoming["settings"] as? Object ?? [:]
+            if calendar {
                 var before: Object = [:]
-                for key in Self.calendarKeys where key == "officialTimes" || settings["customTimetable"] as? Bool != true {
-                    before[key] = settings[key]
-                    settings[key] = expected[key]
+                for key in Self.calendarKeys where key != "semesterStart" || rules["customTimetable"] as? Bool != true {
+                    if archiveCalendar { before[key] = rules[key] }
+                    rules[key] = restoreCalendar ? savedRules[key] : nil
                 }
-                value["settings"] = settings
-                outgoing["settings"] = before
+                value["settings"] = rules
+                if archiveCalendar { outgoing["settings"] = before }
             }
             try writeFile(archive(provider, owner: previous ?? "legacy"), outgoing)
         }
@@ -146,6 +152,16 @@ final class CampusStore {
         let manual = value.rows(key).filter { $0.text("source") == "manual" }
         let ids = Set(manual.map { $0.text("id") })
         value[key] = manual + rows.filter { !ids.contains($0.text("id")) }
+    }
+
+    func replaceTimetable(_ courses: [Object], settings incoming: Object, in value: inout Object) {
+        replace("courses", rows: courses, in: &value)
+        var settings = value["settings"] as? Object ?? [:]
+        let newTerm = settings.text("schoolTerm") != incoming.text("schoolTerm")
+        for key in Self.calendarKeys where key != "semesterStart" || settings["customTimetable"] as? Bool != true {
+            if newTerm || incoming[key] != nil { settings[key] = incoming[key] }
+        }
+        value["settings"] = settings
     }
 
     var preferences: Object {
