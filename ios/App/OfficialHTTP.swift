@@ -1,4 +1,5 @@
 import Foundation
+import SwiftSoup
 import WebKit
 
 enum CampusProvider: String, CaseIterable {
@@ -21,6 +22,10 @@ enum CampusProvider: String, CaseIterable {
 }
 
 struct SessionExpired: Error {}
+
+struct LearningVerificationRequired: LocalizedError {
+    var errorDescription: String? { "学习通要求人工验证，请打开官方验证页" }
+}
 
 struct LearningRateLimited: LocalizedError {
     var errorDescription: String? { "学习通限制了请求频率，请稍后再同步" }
@@ -75,6 +80,11 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate {
 @MainActor
 final class OfficialHTTP {
     static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 Version/16.0 Mobile/15E148 Safari/604.1"
+    static let mobileHomeworkURL = URL(string: "https://mooc1.chaoxing.com/mooc-ans/work/stu-work?ut=s")!
+    private static let verificationHome = URL(string: "https://mooc1.chaoxing.com/antispiderShowVerify.ac")!
+    private let settings: UserDefaults
+    private let verificationKey = "learning.verificationRequired"
+    private var verificationPage: URL?
     private let delegate = NoRedirects()
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -89,6 +99,24 @@ final class OfficialHTTP {
     private var learningBlockedUntil = Date.distantPast
     private var portalGeneration = [CampusProvider: Int]()
 
+    init(settings: UserDefaults) { self.settings = settings }
+
+    var learningVerificationRequired: Bool { settings.bool(forKey: verificationKey) }
+
+    var learningVerificationURL: URL? {
+        learningVerificationRequired ? (verificationPage ?? Self.verificationHome) : nil
+    }
+
+    func clearLearningVerification() {
+        verificationPage = nil
+        settings.removeObject(forKey: verificationKey)
+    }
+
+    private func requireLearningVerification(at url: URL) {
+        if verificationPage == nil { verificationPage = url }
+        settings.set(true, forKey: verificationKey)
+    }
+
     static func form(_ fields: [String: String]) -> String {
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         return fields.sorted { $0.key < $1.key }.map { key, value in
@@ -99,6 +127,7 @@ final class OfficialHTTP {
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let learning = CampusProvider.learning.owns(request.url?.host?.lowercased() ?? "")
+        if learning && learningVerificationRequired { throw LearningVerificationRequired() }
         if learning && Date() < learningBlockedUntil { throw LearningRateLimited() }
         if let host = request.url?.host {
             let now = Date()
@@ -107,16 +136,17 @@ final class OfficialHTTP {
             let wait = start.timeIntervalSince(now)
             if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         }
+        if learning && learningVerificationRequired { throw LearningVerificationRequired() }
         if learning && Date() < learningBlockedUntil { throw LearningRateLimited() }
         let (bytes, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AppError("服务未返回数据") }
         if http.statusCode == 429 {
             if learning {
                 learningBlockedUntil = Date().addingTimeInterval(60)
-                throw LearningRateLimited()
+            } else {
+                if let host = request.url?.host { nextRequest[host] = Date().addingTimeInterval(60) }
+                throw AppError("请求较频繁，请稍后再同步")
             }
-            if let host = request.url?.host { nextRequest[host] = Date().addingTimeInterval(60) }
-            throw AppError("请求较频繁，请稍后再同步")
         }
         return (bytes, http)
     }
@@ -176,6 +206,10 @@ final class OfficialHTTP {
             }
             if (300...399).contains(response.statusCode), let location = response.value(forHTTPHeaderField: "Location"),
                let next = URL(string: location, relativeTo: url)?.absoluteURL {
+                if provider == .learning, let verification = Self.officialVerificationRedirect(next) {
+                    requireLearningVerification(at: verification)
+                    throw LearningVerificationRequired()
+                }
                 if [307, 308].contains(response.statusCode), body != nil, next.host != url.host {
                     throw AppError("官方 POST 请求跳转至其他域名")
                 }
@@ -183,13 +217,33 @@ final class OfficialHTTP {
                 if [301, 302, 303].contains(response.statusCode) { body = nil }
                 continue
             }
+            let html = String(decoding: data, as: UTF8.self)
+            if provider == .learning, html.contains("验证码"),
+               let visible = try? SwiftSoup.parse(html).text(),
+               visible.contains("验证码"),
+               visible.range(of: "操作(?:受到?|已被)?限制|操作过于频繁|9010", options: .regularExpression) != nil {
+                requireLearningVerification(at: body == nil ? url : Self.verificationHome)
+                throw LearningVerificationRequired()
+            }
+            if provider == .learning && learningVerificationRequired { throw LearningVerificationRequired() }
+            if response.statusCode == 429 { throw LearningRateLimited() }
             if response.statusCode == 401 { throw SessionExpired() }
             guard (200...299).contains(response.statusCode) else { throw AppError("官方服务暂未返回数据") }
-            let html = String(decoding: data, as: UTF8.self)
             if html.range(of: #"<input[^>]+(?:type=["']password|id=["'](?:password|mm)["'])"#, options: .regularExpression) != nil &&
                 html.range(of: "用户登录|统一身份认证|手机号/超星号|账号登录", options: .regularExpression) != nil { throw SessionExpired() }
             return (html, url)
         }
         throw AppError("官方登录跳转次数过多")
+    }
+
+    private static func officialVerificationRedirect(_ url: URL) -> URL? {
+        guard url.path.lowercased().split(separator: "/").contains(where: { $0.hasPrefix("antispider") }),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        if parts.scheme == "http", parts.port == nil || parts.port == 80 {
+            parts.scheme = "https"
+            parts.port = nil
+        }
+        guard let target = parts.url, CampusProvider.learning.allows(target) else { return nil }
+        return target
     }
 }

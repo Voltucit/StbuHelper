@@ -33,6 +33,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.time.YearMonth
 import java.time.ZoneId
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /** Direct official HTTPS API + LinYu BLE protocol. No third-party relay and no cached passwords. */
@@ -103,10 +104,14 @@ object QuzhiManager {
         val meterState = try {
             if (activeSession !== active || hasUnsentOrder) return
             nextMeterCheck = now + 5_000
+            if (session?.optInt("activeMeterState", -1) == 0 && finishIdleWater(active) != null) return
             if (ble.isReady && MacFormat.normalize(connectedMac.orEmpty()) == MacFormat.normalize(active.mac)) {
                 ble.query(timeoutMs = 1_500)?.state?.also { state ->
-                    if (state == 0 || BleShowerController.hasPendingSettlement(state)) rememberStoppedMeter(active, state)
-                    if (state == 0 && hasRecordedSettlement(active)) finishSettledWater(active)
+                    if (state == 0) {
+                        if (finishIdleWater(active) == null) rememberStoppedMeter(active, state)
+                    } else if (BleShowerController.hasPendingSettlement(state)) {
+                        rememberStoppedMeter(active, state)
+                    }
                 }
             } else null
         } finally {
@@ -124,7 +129,7 @@ object QuzhiManager {
             if (activeSession !== active || hasUnsentOrder) return@withLock
             requireCurrentAccount(account)
             if (BleShowerController.hasPendingSettlement(session?.optInt("activeMeterState", -1))) recordReceipt(active, cleared = false)
-            else finishSettledWater(active)
+            else finishWaterSession(active)
         }
     }
 
@@ -184,13 +189,13 @@ object QuzhiManager {
             .put("preDeductMoney", display.opt("preDeductMoney") ?: JSONObject.NULL)
     }
 
-    private fun recordReceipt(active: BleShowerController.Session, cleared: Boolean) = synchronized(this) {
+    private fun recordReceipt(active: BleShowerController.Session, cleared: Boolean, settlementConfirmed: Boolean = true) = synchronized(this) {
         val next = JSONObject((session ?: throw IllegalStateException()).toString())
-        val id = WaterReceipt.id(active)
+        val id = if (settlementConfirmed) WaterReceipt.id(active) else UUID.randomUUID().toString()
         if (next.optString("lastReceiptId") != id) {
             val saved = next.optJSONObject("pendingReceipt")?.takeIf { it.optString("id") == id }
             val receipt = saved?.let { JSONObject(it.toString()) } ?: WaterReceipt.create(active, next.optJSONObject("activeDisplay") ?: displayFor(active.mac), cleared)
-            next.put("pendingReceipt", receipt.put("deviceCleared", cleared))
+            next.put("pendingReceipt", receipt.put("id", id).put("deviceCleared", cleared).put("settlementConfirmed", settlementConfirmed))
         }
         if (cleared) removeActiveFields(next)
         else {
@@ -208,8 +213,17 @@ object QuzhiManager {
         return current.optJSONObject("pendingReceipt")?.optString("id") == id || current.optString("lastReceiptId") == id
     }
 
-    private fun finishSettledWater(active: BleShowerController.Session) {
-        recordReceipt(active, cleared = true)
+    private fun finishIdleWater(active: BleShowerController.Session): JSONObject? {
+        val settled = hasRecordedSettlement(active)
+        val display = session?.optJSONObject("activeDisplay") ?: displayFor(active.mac)
+        if (!settled && display.optString("deviceType") != "饮水") return null
+        finishWaterSession(active, settlementConfirmed = settled)
+        val message = if (settled) "用水已结束并完成结算。" else "饮水已结束，实际扣费可在消费账单查看。"
+        return JSONObject().put("message", message).put("active", false).put("settled", settled).put("life", status())
+    }
+
+    private fun finishWaterSession(active: BleShowerController.Session, settlementConfirmed: Boolean = true) {
+        recordReceipt(active, cleared = true, settlementConfirmed = settlementConfirmed)
         activeSession = null
         ble.disconnect()
         connectedMac = null
@@ -218,11 +232,17 @@ object QuzhiManager {
 
     @Synchronized fun confirmReceipt(id: String): JSONObject {
         val current = session ?: throw IllegalArgumentException("请先连接趣智校园")
-        require(current.optJSONObject("pendingReceipt")?.optString("id") == id) { "账单状态已变化，请重新打开" }
-        val next = JSONObject(current.toString()).put("lastReceiptId", id).apply { remove("pendingReceipt") }
+        val receipt = current.optJSONObject("pendingReceipt")
+        require(receipt != null && receipt.optString("id") == id) { "用水记录已变化，请重新打开" }
+        val next = JSONObject(current.toString()).apply {
+            if (receipt.optBoolean("settlementConfirmed", true)) put("lastReceiptId", id)
+            remove("pendingReceipt")
+        }
         vault.saveJson("quzhi", next); session = next
         return status()
     }
+
+    private fun hasPendingSettlementReceipt() = session?.optJSONObject("pendingReceipt")?.optBoolean("settlementConfirmed", true) == true
 
     private fun JSONObject.text(vararg keys: String): String = keys.asSequence().filterNot { isNull(it) }.map { optString(it).trim() }.firstOrNull { it.isNotBlank() && !it.equals("null", true) }.orEmpty()
 
@@ -267,7 +287,7 @@ object QuzhiManager {
     fun login(telephone: String, password: String): JSONObject {
         require(activeSession == null) { "请先结束当前设备并完成结算，再更换账号" }
         require(!hasPendingRate) { "请先核对尚未确认的趣智校园订单" }
-        require(session?.optJSONObject("pendingReceipt") == null) { "请先确认用水账单，再更换账号" }
+        require(!hasPendingSettlementReceipt()) { "请先确认用水账单，再更换账号" }
         require(telephone.matches(Regex("1[0-9]{10}")) && password.isNotEmpty() && password.length <= 1024) { "请检查手机号和密码" }
         val hash = MessageDigest.getInstance("MD5").digest(password.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }.takeLast(10).uppercase()
         val body = checked(request("POST", "/user/login", mapOf("telephone" to telephone, "password" to hash, "phoneSystem" to "android", "type" to "0", "version" to "6.5.28"))) as? JSONObject
@@ -479,7 +499,7 @@ object QuzhiManager {
             if (hasUnsentOrder) "上一次开启指令未发送，请先处理上一次订单"
             else "本机有未完成的用水记录，请先结束并结算，勿重复开启")
         require(!hasPendingRate) { "上一笔计费请求尚未确认，请先核对趣智校园官方订单" }
-        require(session?.optJSONObject("pendingReceipt") == null) { "请先确认上一笔用水账单" }
+        require(!hasPendingSettlementReceipt()) { "请先确认上一笔用水账单" }
         device(mac)
         val device = devices.getValue(mac)
         val auth = authFields()
@@ -532,6 +552,7 @@ object QuzhiManager {
         val active = activeSession ?: throw IllegalArgumentException("本机没有需要结束的订单。若官方 App 正在用水，请在官方 App 中结束。")
         require(mac == null || MacFormat.normalize(mac) == MacFormat.normalize(active.mac)) { "当前用水设备与所选设备不同，请先结束当前设备" }
         if (hasUnsentOrder) return finishUnsentOrder(active)
+        if (session?.optInt("activeMeterState", -1) == 0) finishIdleWater(active)?.let { return it }
         if (!ble.isReady || MacFormat.normalize(connectedMac.orEmpty()) != MacFormat.normalize(active.mac)) {
             if (session?.optInt("activeMeterState", -1) == 0) {
                 return JSONObject().put("message", "设备已停止用水，正在等待官方账单确认。")
@@ -542,11 +563,8 @@ object QuzhiManager {
         connectedMac = active.mac
         val meterState = ble.query(timeoutMs = 1_500)?.state
         if (meterState == 0) {
+            finishIdleWater(active)?.let { return it }
             rememberStoppedMeter(active, meterState)
-            if (hasRecordedSettlement(active)) {
-                finishSettledWater(active)
-                return JSONObject().put("message", "用水已结束并完成结算。").put("active", false).put("settled", true).put("life", status())
-            }
         }
         val knownMeterState = session?.optInt("activeMeterState", -1) ?: -1
         if (meterState == 0 || (meterState == null && knownMeterState == 0) || (meterState == 1 && knownMeterState != -1)) {
@@ -560,7 +578,7 @@ object QuzhiManager {
         val message = when (result) {
             is BleShowerController.SettleOutcome.Uploaded -> {
                 if (result.recordCleared) {
-                    finishSettledWater(active)
+                    finishWaterSession(active)
                     "已结束用水并完成结算，消费金额请到账单中查看。"
                 } else {
                     recordReceipt(active, cleared = false)
@@ -568,8 +586,10 @@ object QuzhiManager {
                 }
             }
             is BleShowerController.SettleOutcome.PartialSettlement -> {
-                if (result.meterState == 0) rememberStoppedMeter(active, 0)
-                else if (session?.has("activeMeterState") != true) rememberStoppedMeter(active, 3)
+                if (result.meterState == 0) {
+                    finishIdleWater(active)?.let { return it }
+                    rememberStoppedMeter(active, 0)
+                } else if (session?.has("activeMeterState") != true) rememberStoppedMeter(active, 3)
                 result.message
             }
             is BleShowerController.SettleOutcome.CloseFailed -> result.message
@@ -587,7 +607,7 @@ object QuzhiManager {
     fun logout(): JSONObject {
         require(activeSession == null) { "当前仍有未完成的用水记录，请先结束并结算" }
         require(!hasPendingRate) { "请先核对尚未确认的趣智校园订单" }
-        require(session?.optJSONObject("pendingReceipt") == null) { "请先确认用水账单" }
+        require(!hasPendingSettlementReceipt()) { "请先确认用水账单" }
         vault.remove("quzhi"); session = null; boundDevices = JSONArray(); devices.clear(); deviceDeposits.clear(); ble.disconnect(); connectedMac = null
         return status()
     }

@@ -11,9 +11,11 @@ function receiptFields(receipt) {
 
 function showWaterReceipt(receipt) {
   if (!receipt?.id || receiptConfirmationRequired) return;
+  const settled = receipt.settlementConfirmed !== false;
   if (lastSettlement?.id !== receipt.id) lastSettlement = { id: receipt.id, balancePending: false };
   lastSettlement.deviceCleared = receipt.deviceCleared !== false;
-  sheet('本次用水结算', `${receiptFields(receipt)}<p class="fine">消费明细可在「生活 → 消费账单」查看。</p><p class="form-error" id="receipt-error" role="alert"></p><button class="primary wide" id="confirm-receipt">确认</button>`, () => {
+  lastSettlement.settlementConfirmed = settled;
+  sheet(settled ? '本次用水结算' : '饮水已结束', `${settled ? receiptFields(receipt) : ''}<p class="fine">实际扣费可在「生活 → 消费账单」查看。</p><p class="form-error" id="receipt-error" role="alert"></p><button class="primary wide" id="confirm-receipt">${settled ? '确认' : '知道了'}</button>`, () => {
     receiptConfirmationRequired = true;
     $('close-sheet').disabled = true;
     $('confirm-receipt').onclick = async () => {

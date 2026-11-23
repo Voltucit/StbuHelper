@@ -6,7 +6,7 @@ import WidgetKit
 
 @MainActor
 final class Academic {
-    struct Course: Codable {
+    struct Course: Codable, Sendable {
         let id: String
         let classId: String
         let cpi: String
@@ -21,7 +21,27 @@ final class Academic {
         var updatedAt = Date.distantPast
     }
 
-    let http = OfficialHTTP()
+    private struct HomeworkItem: Sendable {
+        var id: String
+        let name: String
+        let course: Course
+        let status: String
+        var deadline: Int
+        var deadlineCheckedAt = 0
+        let url: URL?
+        let missingListTime: Bool
+
+        var needsDeadline: Bool { deadline <= 0 && CampusProjection.isPending(status) }
+
+        var row: Object {
+            ["id": id, "name": name, "course": course.name, "groupId": course.key, "status": status,
+             "deadlineAt": deadline, "deadlineCheckedAt": deadlineCheckedAt,
+             "deadline": deadline > 0 ? CampusProjection.format(Date(timeIntervalSince1970: Double(deadline) / 1000), "yyyy-MM-dd HH:mm") : "截止时间未提供",
+             "url": url?.absoluteString ?? "", "source": "school", "provider": "learning"]
+        }
+    }
+
+    let http: OfficialHTTP
     private let store: CampusStore
     private(set) var state: Object = ["running": false]
     private var queuedConnections = Set<CampusProvider>()
@@ -29,15 +49,18 @@ final class Academic {
 
     init(store: CampusStore) {
         self.store = store
+        http = OfficialHTTP(settings: store.settings)
         for provider in CampusProvider.allCases where hasAccount(provider) {
             _ = try? selectCache(provider, adoptLegacy: true)
         }
     }
 
     var accounts: Object {
-        Dictionary(uniqueKeysWithValues: CampusProvider.allCases.map { provider in
+        var result: Object = Dictionary(uniqueKeysWithValues: CampusProvider.allCases.map { provider in
             (provider.rawValue, hasAccount(provider))
         })
+        result["learningVerificationRequired"] = http.learningVerificationRequired
+        return result
     }
 
     private func hasAccount(_ provider: CampusProvider) -> Bool {
@@ -50,6 +73,14 @@ final class Academic {
         store.settings.set(true, forKey: "connected." + provider.rawValue)
         if state["running"] as? Bool == true { queuedConnections.insert(provider) }
         else { start(provider.rawValue, scope: "all") }
+    }
+
+    func resumeVerifiedLearning() throws {
+        guard state["running"] as? Bool != true else { throw AppError("请等当前同步结束，再点「验证后重试」") }
+        _ = try selectCache(.learning, adoptLegacy: true)
+        store.settings.set(true, forKey: "connected.learning")
+        http.clearLearningVerification()
+        start("learning", scope: "homework")
     }
 
     private func selectCache(_ provider: CampusProvider, freshSchoolLogin: Bool = false, adoptLegacy: Bool) throws -> String {
@@ -72,6 +103,7 @@ final class Academic {
         try Keychain.remove("portal." + provider.rawValue)
         store.settings.removeObject(forKey: "connected." + provider.rawValue)
         if provider == .learning {
+            http.clearLearningVerification()
             reminderGeneration += 1
             UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
         }
@@ -80,7 +112,7 @@ final class Academic {
     }
 
     func autoStart() {
-        guard hasAccount(.learning), let owner = try? store.owner(.learning) else { return }
+        guard !http.learningVerificationRequired, hasAccount(.learning), let owner = try? store.owner(.learning) else { return }
         let last = max(store.settings.double(forKey: "lastHomework." + owner),
                        store.settings.double(forKey: "lastHomeworkCheck." + owner))
         if Date().timeIntervalSince1970 - last >= 43_200 {
@@ -107,10 +139,12 @@ final class Academic {
                 guard let owner = try? selectCache(provider, adoptLegacy: true) else { failures.append(provider.rawValue); continue }
                 do {
                     if provider == .learning {
+                        if http.learningVerificationRequired { throw LearningVerificationRequired() }
                         var incomplete = false
                         if scope != "homework" {
                             do { try await timetable(full: scope != "current", owner: owner) }
                             catch is SessionExpired { throw SessionExpired() }
+                            catch let error as LearningVerificationRequired { throw error }
                             catch { incomplete = true }
                         }
                         if scope != "courses" {
@@ -129,6 +163,9 @@ final class Academic {
                         store.settings.set(false, forKey: "connected." + provider.rawValue)
                         expired.append(provider.rawValue)
                     } else { failures.append(provider.rawValue) }
+                } catch let error as LearningVerificationRequired {
+                    if provider == .learning && scope != "courses" { homeworkIssue = error.errorDescription }
+                    failures.append(provider.rawValue)
                 } catch let error as LearningRateLimited {
                     if provider == .learning && scope != "courses" { homeworkIssue = error.errorDescription }
                     failures.append(provider.rawValue)
@@ -226,45 +263,76 @@ final class Academic {
         let expected = Set(choice.selected ?? courses.map(\.key))
         let history = try store.read().rows("tasks")
         let known = Dictionary(history.map { ($0.text("id"), $0) }, uniquingKeysWith: { first, _ in first })
-        var rows = [Object]()
+        var items = [HomeworkItem]()
         var readGroups = Set<String>()
-        var refreshed = Set<String>()
-        var missingDeadlines = 0
-        func collect(_ result: (String, Data?)) throws {
-            let (id, data) = result
-            guard let data, let decoded = try JSONSerialization.jsonObject(with: data) as? [Object] else { return }
-            rows += decoded
+        func collect(_ result: (String, [HomeworkItem]?)) {
+            let (id, courseItems) = result
+            guard let courseItems else { return }
+            items += courseItems
             readGroups.insert(id)
-            let unknown = decoded.filter { CampusProjection.isPending($0.text("status")) && $0.number("deadlineAt") <= 0 }.count
-            missingDeadlines += unknown
-            if unknown == 0 { refreshed.insert(id) }
         }
-        try await withThrowingTaskGroup(of: (String, Data?).self) { group in
+        try await withThrowingTaskGroup(of: (String, [HomeworkItem]?).self) { group in
             for (index, course) in courses.enumerated() {
-                if index >= 2, let result = try await group.next() { try collect(result) }
+                if index >= 2, let result = try await group.next() { collect(result) }
                 group.addTask { @MainActor in
                     do {
-                        let rows = try await self.courseHomework(course, known: known)
-                        return (course.key, try JSONSerialization.data(withJSONObject: rows))
+                        return (course.key, try await self.courseHomework(course, known: known))
                     }
                     catch is SessionExpired { throw SessionExpired() }
+                    catch let error as LearningVerificationRequired { throw error }
                     catch let error as LearningRateLimited { throw error }
                     catch { return (course.key, nil) }
                 }
             }
-            for try await result in group { try collect(result) }
+            for try await result in group { collect(result) }
         }
+
+        let previouslySupplemented = Set(history.filter { $0.text("id").hasPrefix("mobile-work:") }.map { $0.text("groupId") })
+        let now = CampusProjection.milliseconds(Date())
+        let activeGroups = Set(items.filter { $0.deadline > now && CampusProjection.isPending($0.status) }.map { $0.course.key })
+        let uncertainGroups = Set(items.filter { $0.needsDeadline || $0.missingListTime }.map { $0.course.key })
+        let fallbackCourses = courses.filter { course in
+            !readGroups.contains(course.key) || !activeGroups.contains(course.key) ||
+                uncertainGroups.contains(course.key) || previouslySupplemented.contains(course.key)
+        }
+        if !fallbackCourses.isEmpty {
+            let mobile: (items: [HomeworkItem], complete: Bool, referer: URL)?
+            do { mobile = try await mobileHomework(fallbackCourses) }
+            catch let error as LearningVerificationRequired { throw error }
+            catch let error as LearningRateLimited { throw error }
+            catch { mobile = nil }
+            if let mobile {
+                let primaryByCourse = Dictionary(grouping: items) { $0.course.key }
+                var merged = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                for var item in mobile.items {
+                    let matches = (primaryByCourse[item.course.key] ?? []).filter { $0.name == item.name }
+                    if let existing = matches.first {
+                        guard matches.count == 1, existing.needsDeadline || (existing.missingListTime && !item.missingListTime) else { continue }
+                        item.id = existing.id
+                    }
+                    do { item = try await readHomeworkDeadline(item, known: known, referer: mobile.referer) }
+                    catch is SessionExpired { /* The course lists may still be valid. */ }
+                    merged[item.id] = item
+                }
+                items = merged.values.sorted { $0.id < $1.id }
+                if mobile.complete { readGroups.formUnion(fallbackCourses.map(\.key)) }
+            }
+            if mobile?.complete != true { readGroups.subtract(previouslySupplemented) }
+        }
+
         try store.requireOwner(.learning, owner)
         guard try learningOwner() == owner else { throw AppError("学习通账号已变化") }
+        let unresolved = items.filter(\.needsDeadline)
+        let refreshed = readGroups.subtracting(unresolved.map { $0.course.key })
         let failed = expected.subtracting(refreshed)
-        let received = Set(rows.map { $0.text("id") })
-        rows = rows.map { row in
-            guard CampusProjection.isPending(row.text("status")), row.number("deadlineAt") <= 0,
-                  let previous = known[row.text("id")], previous.number("deadlineAt") > 0 else { return row }
-            var retained = row
-            retained["deadlineAt"] = previous.number("deadlineAt")
-            retained["deadline"] = previous.text("deadline")
-            return retained
+        let received = Set(items.map(\.id))
+        var rows = items.map { item in
+            var row = item.row
+            if item.needsDeadline, let previous = known[item.id], previous.number("deadlineAt") > 0 {
+                row["deadlineAt"] = previous.number("deadlineAt")
+                row["deadline"] = previous.text("deadline")
+            }
+            return row
         }
         rows += history.filter { $0.text("source") != "manual" && failed.contains($0.text("groupId")) && !received.contains($0.text("id")) }
         var value = try store.read()
@@ -275,18 +343,18 @@ final class Academic {
         let missingTracked = expected.count - courses.count
         var issues = [String]()
         if unread > 0 { issues.append("\(unread) 门课程的作业暂未读取") }
-        if missingDeadlines > 0 { issues.append("\(missingDeadlines) 项作业的截止时间待确认") }
+        if !unresolved.isEmpty { issues.append("\(unresolved.count) 项作业的截止时间待确认") }
         if missingTracked > 0 { issues.append("\(missingTracked) 门追踪课程未在目录找到，可在「课程追踪」核对") }
         return issues.joined(separator: "，") + "。"
     }
 
-    private func courseHomework(_ course: Course, known: [String: Object]) async throws -> [Object] {
+    private func courseHomework(_ course: Course, known: [String: Object]) async throws -> [HomeworkItem] {
         let entry = address("https://mooc1.chaoxing.com/visit/stucoursemiddle", [
             "courseid": course.id, "clazzid": course.classId, "cpi": course.cpi, "ismooc2": "1", "v": "2"])
         let (body, referer) = try await http.page(entry, provider: .learning)
         let doc = try SwiftSoup.parse(body)
         func value(_ id: String) throws -> String { try doc.select(id).first()?.attr("value") ?? "" }
-        let workEnc = try value("#workEnc")
+        let workEnc = try value("input#workEnc, input[name=workEnc]")
         guard !workEnc.isEmpty else { throw AppError("课程作业入口暂未返回") }
         var enc = try value("#enc")
         if enc.isEmpty { enc = URLComponents(url: referer, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "enc" }?.value ?? "" }
@@ -295,64 +363,151 @@ final class Academic {
             "cpi": course.cpi, "ut": "s", "openc": try value("#openc"), "enc": workEnc, "stuenc": enc,
             "t": String(CampusProjection.milliseconds(Date())), "isdisplaytable": "2"])
         let (html, base) = try await http.page(url, provider: .learning, referer: referer)
-        guard html.range(of: "无权限|无效的用户|没有此页面访问权限", options: .regularExpression) == nil else {
+        let list = try SwiftSoup.parse(html)
+        let listText = try list.text()
+        guard listText.range(of: "无权限|无效的用户|没有此页面访问权限", options: .regularExpression) == nil else {
             throw AppError("暂时无法读取这门课的作业")
         }
-        let list = try SwiftSoup.parse(html)
         let nodes = try list.select("li[data], li[aria-label]").array()
-        var rows = [Object]()
+        var items = [HomeworkItem]()
         var seen = Set<String>()
         for item in nodes {
             let labels = try item.attr("aria-label").components(separatedBy: ";")
             let title = try item.select(".overHidden2, .right-content .title").first()?.text() ?? labels.first ?? ""
             guard !title.isEmpty, try item.select(".right-content, .overHidden2, .status").first() != nil else { continue }
             var status = try item.select(".status").first()?.text() ?? labels.dropFirst().joined(separator: ";")
-            let time = try item.select(".time").first()?.text() ?? ""
+            let time = (try item.select(".time").first()?.text() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let text = ([status, time] + Array(labels.dropFirst())).joined(separator: " ")
             if text.range(of: "已过期|已截止|已结束|已超时|已逾期|逾期|已超期|已过截止|过期未交", options: .regularExpression) != nil { status += " 已过期" }
             if text.range(of: "截止时间未提供|截止时间未知|未设置截止|无截止时间|不限时|永久有效", options: .regularExpression) != nil { status += " 截止时间未提供" }
-            var link = try item.attr("data")
+            let dataLink = try item.attr("data")
+            var link = dataLink
             if link.isEmpty { link = try item.select("a[href]").first()?.attr("href") ?? "" }
-            if link.lowercased().hasPrefix("http%") || link.lowercased().hasPrefix("%2f") { link = link.removingPercentEncoding ?? link }
-            let resolved = link.isEmpty ? nil : URL(string: link, relativeTo: base)?.absoluteURL
-            let taskURL = resolved.flatMap { CampusProvider.learning.allows($0) ? $0 : nil }
+            let taskURL = Self.homeworkLink(link, relativeTo: base)
             let workId = taskURL.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name.lowercased() == "workid" }?.value }
             let id = "work:" + course.key + ":" + (workId ?? title)
             guard seen.insert(id).inserted else { continue }
             var deadline = try Self.accessibleDeadline(item)
             if deadline == 0 { deadline = Self.labelledDeadline(text) }
             if deadline == 0 { deadline = Self.deadline(time) }
-            var checked = 0
-            if deadline == 0, CampusProjection.isPending(status), let taskURL {
-                let now = CampusProjection.milliseconds(Date())
-                let previous = known[id]
-                if let previous, previous.number("deadlineAt") > now,
-                   (0..<21_600_000).contains(now - previous.number("deadlineCheckedAt")) {
-                    deadline = previous.number("deadlineAt")
-                    checked = previous.number("deadlineCheckedAt")
-                } else {
-                    do {
-                        let (detail, _) = try await http.page(taskURL, provider: .learning, referer: base)
-                        let page = try SwiftSoup.parse(detail)
-                        deadline = try Self.accessibleDeadline(page)
-                        if deadline == 0 { deadline = Self.labelledDeadline(try page.text()) }
-                        if deadline > 0 { checked = now }
-                    } catch is SessionExpired { throw SessionExpired() }
-                    catch let error as LearningRateLimited { throw error }
-                    catch { deadline = 0 }
-                }
+            var missingListTime = false
+            if deadline == 0, time.isEmpty, CampusProjection.isPending(status),
+               !dataLink.isEmpty, try item.attr("onclick").contains("goTask"),
+               try item.select(".overHidden2").first() != nil {
+                let labels = try item.select(".label").array()
+                let peerReview = try labels.contains { try $0.text().contains("互评") }
+                missingListTime = !peerReview
             }
-            rows.append(["id": id, "name": title, "course": course.name, "groupId": course.key, "status": status,
-                         "deadlineAt": deadline, "deadlineCheckedAt": checked, "deadline": deadline > 0
-                         ? CampusProjection.format(Date(timeIntervalSince1970: Double(deadline) / 1000), "yyyy-MM-dd HH:mm") : "截止时间未提供",
-                         "url": taskURL?.absoluteString ?? "", "source": "school", "provider": "learning"])
+            if missingListTime { status += " 截止时间未提供" }
+            let item = HomeworkItem(id: id, name: title, course: course, status: status, deadline: deadline,
+                                    url: taskURL, missingListTime: missingListTime)
+            items.append(try await readHomeworkDeadline(item, known: known, referer: base))
         }
-        if rows.isEmpty {
+        if items.isEmpty {
             let emptyProgress = html.range(of: #"<span>\s*0\s*/\s*0\s*</span>\s*</div>\s*</div>"#, options: [.regularExpression, .caseInsensitive]) != nil
-            let emptyText = try list.text().range(of: #"(?:暂无|没有)作业(?!权限|入口|功能)|共\s*0\s*[份个]"#, options: .regularExpression) != nil
+            let emptyText = Self.confirmsNoHomework(listText)
             guard emptyProgress || emptyText else { throw AppError("作业列表格式暂未识别") }
         }
-        return rows
+        return items
+    }
+
+    private func mobileHomework(_ courses: [Course]) async throws -> (items: [HomeworkItem], complete: Bool, referer: URL) {
+        let (html, referer) = try await http.page(OfficialHTTP.mobileHomeworkURL, provider: .learning)
+        let list = try SwiftSoup.parse(html)
+        let text = try list.text()
+        guard text.range(of: "无权限|无效的用户|没有此页面访问权限|没有作业权限", options: .regularExpression) == nil else {
+            throw AppError("学习通拒绝读取移动端作业")
+        }
+        let nodes = try list.select("li[onclick*=goTask]").array()
+        guard !nodes.isEmpty || Self.confirmsNoHomework(text) else { throw AppError("移动端作业列表格式暂未识别") }
+
+        let groups = Dictionary(courses.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        let closed: Set<String> = ["已完成", "已提交", "已交", "待批阅", "已批阅", "已作答", "已截止", "已结束",
+                                  "已过期", "已超时", "已超期", "已逾期", "逾期未交", "过期未交", "无截止时间", "截止时间未提供"]
+        func knownStatus(_ status: String) -> Bool { CampusProjection.isPending(status) || closed.contains(status) }
+        var items = [HomeworkItem]()
+        var complete = true
+        var seen = Set<String>()
+        for node in nodes {
+            let raw = try node.attr("data")
+            guard let url = Self.homeworkLink(raw, relativeTo: referer) else {
+                complete = false
+                continue
+            }
+            let fields = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).reduce(into: [String: String]()) {
+                $0[$1.name.lowercased()] = $1.value
+            }
+            guard let courseID = fields["courseid"], !courseID.isEmpty,
+                  let classID = fields["clazzid"] ?? fields["classid"], !classID.isEmpty else {
+                complete = false
+                continue
+            }
+            guard let course = groups[courseID + ":" + classID] else { continue }
+            let title = (try node.select("p").first()?.text() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            var status = (try node.select(".status").first()?.text() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if status.isEmpty {
+                for label in try node.select("[aria-label], span[aria-hidden=true]").array() {
+                    let accessible = try label.attr("aria-label")
+                    let candidate: String
+                    if let marker = accessible.range(of: "作业状态") { candidate = String(accessible[marker.upperBound...]) }
+                    else { candidate = try label.text() }
+                    let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if knownStatus(value) { status = value; break }
+                }
+            }
+            guard !title.isEmpty, let ref = fields["taskrefid"], !ref.isEmpty, fields["type"] == "work", knownStatus(status) else {
+                complete = false
+                continue
+            }
+            let id = "mobile-work:" + course.key + ":" + ref
+            guard CampusProjection.isPending(status), seen.insert(id).inserted else { continue }
+            let deadline = try Self.accessibleDeadline(node)
+            let remaining = try node.select(".fr").first()?.text() ?? ""
+            items.append(HomeworkItem(id: id, name: title, course: course, status: status, deadline: deadline,
+                                      url: url, missingListTime: deadline == 0 && !remaining.contains("剩余")))
+        }
+        return (items, complete, referer)
+    }
+
+    private func readHomeworkDeadline(_ item: HomeworkItem, known: [String: Object], referer: URL) async throws -> HomeworkItem {
+        guard item.needsDeadline, let url = item.url else { return item }
+        var result = item
+        let now = CampusProjection.milliseconds(Date())
+        if let previous = known[item.id], previous.number("deadlineAt") > now,
+           (0..<21_600_000).contains(now - previous.number("deadlineCheckedAt")) {
+            result.deadline = previous.number("deadlineAt")
+            result.deadlineCheckedAt = previous.number("deadlineCheckedAt")
+            return result
+        }
+        do {
+            let (detail, _) = try await http.page(url, provider: .learning, referer: referer)
+            let page = try SwiftSoup.parse(detail)
+            result.deadline = try Self.accessibleDeadline(page)
+            if result.deadline == 0 { result.deadline = Self.labelledDeadline(try page.text()) }
+            if result.deadline > 0 { result.deadlineCheckedAt = now }
+        } catch is SessionExpired { throw SessionExpired() }
+        catch let error as LearningVerificationRequired { throw error }
+        catch let error as LearningRateLimited { throw error }
+        catch { return item }
+        return result
+    }
+
+    private static func confirmsNoHomework(_ text: String) -> Bool {
+        text.range(of: #"(?:暂无|没有)作业(?!权限|入口|功能)|共\s*0\s*[份个]"#, options: .regularExpression) != nil
+    }
+
+    private static func homeworkLink(_ raw: String, relativeTo base: URL) -> URL? {
+        guard !raw.isEmpty else { return nil }
+        let encoded = raw.lowercased().hasPrefix("http%") || raw.lowercased().hasPrefix("%2f")
+        let link = encoded ? (raw.removingPercentEncoding ?? raw) : raw
+        guard let url = URL(string: link, relativeTo: base)?.absoluteURL,
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        if parts.scheme == "http", parts.port == nil || parts.port == 80 {
+            parts.scheme = "https"
+            parts.port = nil
+        }
+        guard let official = parts.url, CampusProvider.learning.allows(official) else { return nil }
+        return official
     }
 
     private func timetable(full: Bool, owner: String) async throws {

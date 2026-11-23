@@ -145,6 +145,28 @@ iOS Release 默认按 App Store Connect 方式签名并导出到本地。请在�
 
 若要用 iPhone 调试，可在 iOS Debug 配置里设置 `STBU_IOS_DEBUG_DEVICE=1` 及 `STBU_IOS_TEAM`，将签名后的 Debug IPA 和归档输出到 `ios/Debug/Device/`。默认的模拟器 `.app` 用于 iOS Simulator。如需自定义导出方式，可将 `STBU_IOS_EXPORT_OPTIONS` 指向 Xcode 导出的本机 plist，例如 `ExportOptions.local.plist`（相对于 `ios/`）。输出为本地文件，提交发布由你执行。
 
+## GitHub Actions 打包 Android APK
+
+将 `.github/workflows/android-apk.yml` 提交到 GitHub 仓库默认分支后，打开 **Actions → Android APK → Run workflow**。选择 `debug` 或 `release`，构建完成后在这次运行的 **Artifacts** 下载 `StbuHelper-debug.apk` 或 `StbuHelper-release.apk`。产物保留 7 天。
+
+Debug 使用调试签名，可以直接构建。Release 使用现有发布密钥，需要先在仓库的 **Settings → Secrets and variables → Actions** 添加四个 Repository secrets。
+
+| Secret | 内容 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | `storeFile` 指向的密钥文件，编码为 Base64 |
+| `ANDROID_KEYSTORE_PASSWORD` | `storePassword` |
+| `ANDROID_KEY_ALIAS` | `keyAlias` |
+| `ANDROID_KEY_PASSWORD` | `keyPassword` |
+
+在项目根目录用 PowerShell 将已有密钥文件转为 Base64 并复制到剪贴板。请将路径换成你的实际 `storeFile`。
+
+```powershell
+$keystorePath = (Resolve-Path -LiteralPath 'signing/stbu-helper-release.jks').ProviderPath
+Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($keystorePath)))
+```
+
+把剪贴板内容粘贴到 `ANDROID_KEYSTORE_BASE64`。密钥文件和真实的 `keystore.properties` 继续保留在本机。要覆盖已安装的 Release 版本，需沿用原发布签名。[GitHub Actions Secrets](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions)
+
 ## 登录与本机数据
 
 默认在 App 表单输入学校学号或学习通手机号/超星号，图片验证码和学校短信验证也在表单中处理；后台使用隔离的官方 WebView 保留官方认证逻辑。微信、QQ 或其他验证需要用户主动点击“打开官方网页”，不会自动跳转。

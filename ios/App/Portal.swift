@@ -7,6 +7,7 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
     private let initial: URL
     private let http: OfficialHTTP
     private let onConnected: (Bool) throws -> Void
+    private let onVerified: (() throws -> Void)?
     private let web: WKWebView
     private var connected = false
     private var openedLogin = false
@@ -15,11 +16,13 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
         "mp.weixin.qq.com", "graph.qq.com", "connect.qq.com", "xui.ptlogin2.qq.com", "ssl.ptlogin2.qq.com",
         "ptlogin2.qq.com", "ui.ptlogin2.qq.com"]
 
-    init(provider: CampusProvider, url: URL?, http: OfficialHTTP, onConnected: @escaping (Bool) throws -> Void) {
+    init(provider: CampusProvider, url: URL?, http: OfficialHTTP,
+         onVerified: (() throws -> Void)? = nil, onConnected: @escaping (Bool) throws -> Void) {
         self.provider = provider
         initial = url ?? provider.home
         self.http = http
         self.onConnected = onConnected
+        self.onVerified = onVerified
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         web = WKWebView(frame: .zero, configuration: config)
@@ -33,6 +36,12 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
         view.backgroundColor = .systemBackground
         title = provider.label
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "返回", style: .done, target: self, action: #selector(close))
+        if onVerified != nil {
+            title = "学习通验证"
+            let retry = UIBarButtonItem(title: "验证后重试", style: .plain, target: self, action: #selector(retryAfterVerification))
+            retry.isEnabled = false
+            navigationItem.leftBarButtonItem = retry
+        }
         web.navigationDelegate = self
         web.uiDelegate = self
         status.text = "正在打开官方页面"
@@ -58,9 +67,36 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
 
     @objc private func close() { dismiss(animated: true) }
 
+    @objc private func retryAfterVerification() {
+        guard let onVerified, let url = web.url, provider.allows(url),
+              let retry = navigationItem.leftBarButtonItem else { return }
+        retry.isEnabled = false
+        Task {
+            defer { retry.isEnabled = true }
+            let cookies = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
+            guard web.url == url else { return }
+            guard hasLearningSession(cookies) else {
+                status.text = "请先在官方页面完成登录与验证。"
+                return
+            }
+            do {
+                try http.remember(cookies, provider: provider, freshLogin: false)
+                try onVerified()
+                dismiss(animated: true)
+            } catch { status.text = error.localizedDescription }
+        }
+    }
+
     private func allowed(_ url: URL) -> Bool {
         provider.allows(url) || (url.scheme == "https" && url.user == nil && url.password == nil &&
             (url.port == nil || url.port == 443) && oauthHosts.contains(url.host?.lowercased() ?? ""))
+    }
+
+    private func hasLearningSession(_ cookies: [HTTPCookie]) -> Bool {
+        cookies.contains {
+            CampusProvider.learning.owns($0.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()) &&
+                ["_uid", "UID", "PUID"].contains($0.name)
+        }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
@@ -92,6 +128,11 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let url = webView.url, provider.allows(url) else { return }
+        if onVerified != nil {
+            status.text = "请在官方页面完成验证码，再点「验证后重试」。"
+            navigationItem.leftBarButtonItem?.isEnabled = true
+            return
+        }
         status.text = url.host
         if ["/cas/login", "/xtgl/login_slogin.html"].contains(url.path) ||
             (url.host == "passport2.chaoxing.com" && url.path == "/login") {
@@ -105,9 +146,7 @@ final class PortalController: UIViewController, WKNavigationDelegate, WKUIDelega
         Task {
             let cookies = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
             guard webView.url == url else { return }
-            if provider == .learning && !cookies.contains(where: {
-                provider.owns($0.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))) && ["_uid", "UID", "PUID"].contains($0.name)
-            }) { return }
+            if provider == .learning && !hasLearningSession(cookies) { return }
             do {
                 try http.remember(cookies, provider: provider, freshLogin: openedLogin)
                 if !connected {

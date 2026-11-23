@@ -18,7 +18,8 @@ function waterStatus() {
 
 function settlementView() {
   if (!lastSettlement) return '';
-  const message = lastSettlement.deviceCleared === false ? '已记账，设备记录待清理' : lastSettlement.balancePending ? '用水已结束，余额可稍后刷新' : '用水已结算，明细可在消费账单查看';
+  const message = lastSettlement.settlementConfirmed === false ? '饮水已结束，实际扣费可在消费账单查看'
+    : lastSettlement.deviceCleared === false ? '已记账，设备记录待清理' : lastSettlement.balancePending ? '用水已结束，余额可稍后刷新' : '用水已结算，明细可在消费账单查看';
   return `<section class="settlement-note"><h3>最近一次使用</h3><p>${message}</p></section>`;
 }
 

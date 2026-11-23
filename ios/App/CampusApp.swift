@@ -187,7 +187,11 @@ final class CampusController: UIViewController, WKNavigationDelegate, UIDocument
             return ["preferences": store.preferences]
         case "openPortal":
             guard let provider = CampusProvider(rawValue: args.text("kind")) else { throw AppError("无法识别登录入口") }
-            try portal(provider, nil)
+            if provider == .learning, let url = academic.http.learningVerificationURL {
+                try portal(provider, url, verification: true)
+            } else {
+                try portal(provider, nil)
+            }
             return Object()
         case "openTask":
             guard let url = URL(string: args.text("url")), CampusProvider.learning.allows(url) else { throw AppError("作业链接无效") }
@@ -205,7 +209,12 @@ final class CampusController: UIViewController, WKNavigationDelegate, UIDocument
             state["updatedAt"] = try store.read().text("updatedAt")
             return state
         case "homeworkTracking": return academic.trackingStatus()
-        case "refreshHomeworkCourses": return try await academic.refreshCourses()
+        case "refreshHomeworkCourses":
+            do { return try await academic.refreshCourses() }
+            catch let error as LearningVerificationRequired {
+                if ready { web.evaluateJavaScript("window.onNativeResume && window.onNativeResume()") }
+                throw error
+            }
         case "saveHomeworkTracking": return try academic.saveTracking(args)
         case "configureReminders": return try await academic.configureReminders(args["enabled"] as? Bool == true)
         case "notificationSettings":
@@ -260,9 +269,17 @@ final class CampusController: UIViewController, WKNavigationDelegate, UIDocument
         return provider
     }
 
-    private func portal(_ provider: CampusProvider, _ url: URL?) throws {
+    private func portal(_ provider: CampusProvider, _ url: URL?, verification: Bool = false) throws {
         guard presentedViewController == nil else { throw AppError("请先关闭当前窗口") }
-        let portal = PortalController(provider: provider, url: url, http: academic.http) { [weak self] freshLogin in
+        let verified: (() throws -> Void)?
+        if verification {
+            verified = { [weak self] in
+                guard let self else { return }
+                try self.academic.resumeVerifiedLearning()
+                self.resume()
+            }
+        } else { verified = nil }
+        let portal = PortalController(provider: provider, url: url, http: academic.http, onVerified: verified) { [weak self] freshLogin in
             guard let self else { return }
             try self.academic.connected(provider, freshLogin: freshLogin)
             self.resume()
