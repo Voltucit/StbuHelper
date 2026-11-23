@@ -88,11 +88,13 @@ final class Academic {
         if provider == .learning { owner = try learningOwner() }
         else if !freshSchoolLogin, let previous = try store.owner(.school) { owner = previous }
         else { owner = UUID().uuidString.lowercased() }
-        if try store.selectAccount(provider, owner: owner, adoptLegacy: adoptLegacy), provider == .learning {
-            reminderGeneration += 1
-            let center = UNUserNotificationCenter.current()
-            center.removeAllPendingNotificationRequests()
-            center.removeAllDeliveredNotifications()
+        if try store.selectAccount(provider, owner: owner, adoptLegacy: adoptLegacy) {
+            if provider == .learning {
+                reminderGeneration += 1
+                let center = UNUserNotificationCenter.current()
+                center.removeAllPendingNotificationRequests()
+                center.removeAllDeliveredNotifications()
+            }
             publishWidgets()
         }
         return owner
@@ -130,9 +132,16 @@ final class Academic {
             var expired = [String]()
             var homeworkComplete: Bool?
             var homeworkIssue: String?
-            let providers = CampusProvider.allCases.filter { selected == "all" ? hasAccount($0) : selected == $0.rawValue }
+            var scheduleIssue: String?
+            let providers: [CampusProvider]
+            switch scope {
+            case "courses", "records": providers = [.school]
+            case "homework": providers = [.learning]
+            default: providers = [CampusProvider.school, .learning].filter { selected == "all" ? hasAccount($0) : selected == $0.rawValue }
+            }
             for provider in providers {
-                if provider == .learning && scope != "courses" {
+                guard hasAccount(provider) else { expired.append(provider.rawValue); continue }
+                if provider == .learning {
                     homeworkComplete = false
                     homeworkIssue = "暂时无法确认学习通账号或读取本机缓存。"
                 }
@@ -140,34 +149,39 @@ final class Academic {
                 do {
                     if provider == .learning {
                         if http.learningVerificationRequired { throw LearningVerificationRequired() }
-                        var incomplete = false
-                        if scope != "homework" {
-                            do { try await timetable(full: scope != "current", owner: owner) }
-                            catch is SessionExpired { throw SessionExpired() }
-                            catch let error as LearningVerificationRequired { throw error }
-                            catch { incomplete = true }
+                        store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomeworkCheck." + owner)
+                        homeworkIssue = "学习通的作业列表暂未读取，或本机记录未能保存。"
+                        homeworkIssue = try await homework(owner: owner)
+                        homeworkComplete = homeworkIssue == nil
+                        if homeworkComplete == true {
+                            store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomework." + owner)
+                        } else { failures.append(provider.rawValue) }
+                    } else if scope == "records" {
+                        try await schoolRecords(owner: owner)
+                    } else {
+                        do {
+                            let timetable = try await SchoolTimetable.read(http)
+                            try store.requireOwner(.school, owner)
+                            var value = try store.read()
+                            store.replaceTimetable(timetable.courses, settings: timetable.settings, in: &value)
+                            try commit(value)
+                        } catch is SessionExpired { throw SessionExpired() }
+                        catch {
+                            scheduleIssue = (error as? AppError)?.errorDescription ?? "教务课表同步未完成，已保留本机课表"
+                            failures.append(provider.rawValue)
                         }
-                        if scope != "courses" {
-                            store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomeworkCheck." + owner)
-                            homeworkIssue = "学习通的作业列表暂未读取，或本机记录未能保存。"
-                            homeworkIssue = try await homework(owner: owner)
-                            homeworkComplete = homeworkIssue == nil
-                            if homeworkIssue == nil {
-                                store.settings.set(Date().timeIntervalSince1970, forKey: "lastHomework." + owner)
-                            } else { incomplete = true }
-                        }
-                        if incomplete { failures.append(provider.rawValue) }
-                    } else { try await school(owner: owner) }
+                        if scope == "all" { try await schoolRecords(owner: owner) }
+                    }
                 } catch is SessionExpired {
                     if (try? store.owner(provider)) == owner {
                         store.settings.set(false, forKey: "connected." + provider.rawValue)
                         expired.append(provider.rawValue)
                     } else { failures.append(provider.rawValue) }
                 } catch let error as LearningVerificationRequired {
-                    if provider == .learning && scope != "courses" { homeworkIssue = error.errorDescription }
+                    if provider == .learning { homeworkIssue = error.errorDescription }
                     failures.append(provider.rawValue)
                 } catch let error as LearningRateLimited {
-                    if provider == .learning && scope != "courses" { homeworkIssue = error.errorDescription }
+                    if provider == .learning { homeworkIssue = error.errorDescription }
                     failures.append(provider.rawValue)
                 } catch { failures.append(provider.rawValue) }
             }
@@ -176,6 +190,7 @@ final class Academic {
             state = ["id": id, "running": false, "success": !providers.isEmpty && failures.isEmpty && expired.isEmpty, "needLogin": expired]
             if let homeworkComplete { state["homeworkComplete"] = homeworkComplete }
             if let homeworkIssue { state["homeworkIssue"] = homeworkIssue }
+            if let scheduleIssue { state["scheduleIssue"] = scheduleIssue }
             if let provider = queuedConnections.first {
                 let selected = queuedConnections.count > 1 ? "all" : provider.rawValue
                 queuedConnections.removeAll()
@@ -510,76 +525,7 @@ final class Academic {
         return official
     }
 
-    private func timetable(full: Bool, owner: String) async throws {
-        let local = try store.read()["settings"] as? Object ?? [:]
-        let week = min(max(CampusProjection.week(local.text("semesterStart"), Date()) ?? 1, 1), max(1, min(local.number("teachingWeeks"), 60)))
-        let first = try await weekPage(week)
-        guard let curriculum = first["curriculum"] as? Object else { throw AppError("尚未返回学期数据") }
-        let limit = min(max(curriculum.number("maxWeek") == 0 ? 30 : curriculum.number("maxWeek"), 1), 60)
-        let primaryStart = curriculum.number("firstWeekDate")
-        let startMs = primaryStart > 0 ? primaryStart : curriculum.number("firstWeekDateReal")
-        let start = startMs > 0 ? CampusProjection.format(Date(timeIntervalSince1970: Double(startMs) / 1000), "yyyy-MM-dd") : ""
-        let actualStart = local["customTimetable"] as? Bool == true || start.isEmpty ? local.text("semesterStart") : start
-        let current = min(max(CampusProjection.week(actualStart, Date()) ?? 1, 1), limit)
-        let prefs = store.settings
-        let signature = start + ":" + String(limit)
-        let newSemester = local.text("semesterStart").isEmpty == false && !start.isEmpty && start != local.text("semesterStart") && local["customTimetable"] as? Bool != true
-        let needsFull = newSemester || (full && (prefs.string(forKey: "scheduleSignature." + owner) != signature ||
-            Date().timeIntervalSince1970 - prefs.double(forKey: "lastSchedule." + owner) >= 86_400))
-        let currentPage = current == week ? first : try await weekPage(current)
-        var pages = [current: currentPage]
-        if needsFull {
-            for number in 1...limit where number != current {
-                pages[number] = number == week ? first : try await weekPage(number)
-            }
-        }
-
-        try store.requireOwner(.learning, owner)
-        guard try learningOwner() == owner else { throw AppError("学习通账号已变化") }
-        var rows = [String: Object]()
-        var value = try store.read()
-        for row in value.rows("courses") where row.text("source") != "manual" && !needsFull {
-            let remaining = (row["weeks"] as? [Int] ?? []).filter { pages[$0] == nil }
-            if !remaining.isEmpty { var updated = row; updated["weeks"] = remaining; rows[row.text("id")] = updated }
-        }
-        for (number, page) in pages {
-            guard let raw = page["lessonArray"] as? [Object] else { throw AppError("课表格式暂未识别") }
-            for row in raw {
-                let day = row.number("dayOfWeek"), first = row.number("beginNumber"), length = row.number("length")
-                guard (1...7).contains(day), (1...16).contains(first), (1...16).contains(length),
-                      first + length <= 17, !row.text("name").isEmpty else { throw AppError("课表节次暂未识别") }
-                let id = "cx:" + [row.text("lessonId"), row.text("name"), String(day), String(first), String(length),
-                                  row.text("location"), row.text("teacherName")].joined(separator: "|")
-                let weeks = (rows[id]?["weeks"] as? [Int] ?? []) + [number]
-                rows[id] = ["id": id, "name": row.text("name"), "day": day, "weeks": weeks.sorted(), "sections": Array(first..<first + length),
-                            "room": row.text("location"), "teacher": row.text("teacherName"), "source": "school", "provider": "learning"]
-            }
-        }
-        store.replace("courses", rows: Array(rows.values), in: &value)
-        var settings = value["settings"] as? Object ?? [:]
-        if !actualStart.isEmpty && settings["customTimetable"] as? Bool != true { settings["semesterStart"] = actualStart }
-        if let periods = curriculum["lessonTimeConfigArray"] as? [String] {
-            let normalized = CampusProjection.normalizeTimes(periods)
-            if !normalized.isEmpty { settings["officialTimes"] = normalized }
-        }
-        settings["teachingWeeks"] = limit
-        value["settings"] = settings
-        try commit(value)
-        if needsFull {
-            prefs.set(signature, forKey: "scheduleSignature." + owner)
-            prefs.set(Date().timeIntervalSince1970, forKey: "lastSchedule." + owner)
-        }
-    }
-
-    private func weekPage(_ week: Int) async throws -> Object {
-        let (body, _) = try await http.page(URL(string: "https://kb.chaoxing.com/pc/curriculum/getMyLessons")!,
-                                          provider: .learning, form: ["week": String(week)])
-        let response = try json(body)
-        guard response.number("result") == 1, let value = response["data"] as? Object else { throw AppError("课表未返回") }
-        return value
-    }
-
-    private func school(owner: String) async throws {
+    private func schoolRecords(owner: String) async throws {
         let (html, _) = try await http.page(CampusProvider.school.home, provider: .school)
         let menu = try SwiftSoup.parse(html)
         let year = try menu.select("#xnm option[selected]").first()?.attr("value") ?? ""

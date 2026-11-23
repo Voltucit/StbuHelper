@@ -229,10 +229,10 @@ class MainActivity : Activity() {
                         val result = HomeworkTracking(this).save(args.getString("account"), args.optBoolean("custom"), args.getJSONArray("selected"))
                         runCatching { HomeworkReminders.trackingChanged(this) }
                         runCatching { cn.stbu.helper.ui.widgets.CampusWidgets.update(applicationContext) }
-                        AcademicSync.start(applicationContext, provider = "learning", afterCurrent = true, homeworkOnly = true)
+                        AcademicSync.start(applicationContext, provider = "learning", afterCurrent = true, scope = AcademicSync.Scope.HOMEWORK)
                         result
                     }
-                    "syncAcademics" -> { val provider = args.optString("provider", "all"); require(provider in setOf("all", "learning", "school")); AcademicSync.start(applicationContext, force = true, provider = provider, homeworkOnly = args.optBoolean("homeworkOnly"), coursesOnly = args.optBoolean("coursesOnly"), currentWeekOnly = args.optBoolean("currentWeekOnly")) }
+                    "syncAcademics" -> { val provider = args.optString("provider", "all"); require(provider in setOf("all", "learning", "school")); AcademicSync.start(applicationContext, provider = provider, scope = AcademicSync.Scope.fromRequest(args)) }
                     "academicState" -> AcademicSync.state().put("updatedAt", repository.read().optString("updatedAt"))
                     "academicLogout" -> { require(!AcademicSync.state().optBoolean("running")) { "同步进行中，请完成后再退出账号" }; val provider = args.getString("provider"); require(provider in setOf("learning", "school")); AcademicSession(this).clear(provider); AcademicSession(this).status() }
                     "configureReminders" -> {

@@ -22,7 +22,7 @@ https://github.com/DanMo661/xuexitong-cli （MIT）。研究公开客户端中�
 
 ## 正方查询接口参考
 
-https://github.com/openschoolcn/zfn_api 和 https://github.com/drfccv/ZFJW-backend 。研究公开的成绩/考试请求路径、分页字段和 JSON 格式，没有复制其后端实现，也不使用外部转发服务。实际学校接口由用户验证。
+https://github.com/openschoolcn/zfn_api 和 https://github.com/drfccv/ZFJW-backend 。研究公开的教务查询路径、分页字段和 JSON 格式。个人课表、教学周和节次时间已对照四川工商学院教务页面，数据通过设备上的教务会话读取。
 
 ## AndroidX WebKit / Kotlin Coroutines / Gson / Jsoup
 

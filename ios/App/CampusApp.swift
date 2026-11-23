@@ -201,8 +201,9 @@ final class CampusController: UIViewController, WKNavigationDelegate, UIDocument
         case "syncAcademics":
             let selected = args.text("provider", "all")
             guard selected == "all" || CampusProvider(rawValue: selected) != nil else { throw AppError("请选择同步账号") }
-            let scope = args["homeworkOnly"] as? Bool == true ? "homework" : args["coursesOnly"] as? Bool == true ? "courses"
-                : args["currentWeekOnly"] as? Bool == true ? "current" : "all"
+            let legacyScope = args["homeworkOnly"] as? Bool == true ? "homework" : args["coursesOnly"] as? Bool == true ? "courses"
+                : args["currentWeekOnly"] as? Bool == true ? "home" : "all"
+            let scope = args.text("scope", legacyScope)
             return academic.start(selected, scope: scope)
         case "academicState":
             var state = academic.state

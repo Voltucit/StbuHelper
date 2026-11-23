@@ -7,7 +7,6 @@ import cn.stbu.helper.backend.homework.HomeworkTracking
 import cn.stbu.helper.backend.storage.LocalRepository
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.webkit.CookieManager
 import org.json.JSONArray
 import org.json.JSONException
@@ -15,9 +14,6 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.io.IOException
 import java.net.SocketTimeoutException
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.temporal.ChronoUnit
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorCompletionService
@@ -32,29 +28,38 @@ object AcademicSync {
     private val busy = AtomicBoolean(false)
     private val startLock = Any()
     private var queuedProvider: String? = null
-    private var queuedForce = false
-    private var queuedHomeworkOnly = true
-    private var queuedCoursesOnly = true
-    private var queuedCurrentWeekOnly = true
+    private var queuedScope: Scope? = null
     private const val HOMEWORK_INTERVAL = 12 * 60 * 60 * 1000L
-    private const val SCHEDULE_INTERVAL = 24 * 60 * 60 * 1000L
     private const val DETAIL_INTERVAL = 6 * 60 * 60 * 1000L
     @Volatile private var current = JSONObject().put("running", false)
 
     fun state(): JSONObject = JSONObject(current.toString())
 
-    fun start(context: Context, force: Boolean = true, provider: String = "all", afterCurrent: Boolean = false, homeworkOnly: Boolean = false, coursesOnly: Boolean = false, currentWeekOnly: Boolean = false, finished: (() -> Unit)? = null): JSONObject {
-        require(!homeworkOnly || !coursesOnly)
+    enum class Scope { ALL, HOME, COURSES, HOMEWORK, RECORDS;
+        companion object {
+            fun fromRequest(args: JSONObject) = when (args.optString("scope")) {
+                "home" -> HOME
+                "courses" -> COURSES
+                "homework" -> HOMEWORK
+                "records" -> RECORDS
+                else -> when {
+                    args.optBoolean("homeworkOnly") -> HOMEWORK
+                    args.optBoolean("coursesOnly") -> COURSES
+                    args.optBoolean("currentWeekOnly") -> HOME
+                    else -> ALL
+                }
+            }
+        }
+    }
+
+    fun start(context: Context, provider: String = "all", afterCurrent: Boolean = false, scope: Scope = Scope.ALL, finished: (() -> Unit)? = null): JSONObject {
         val app = context.applicationContext
         val runId = System.nanoTime().toString()
         synchronized(startLock) {
             if (!busy.compareAndSet(false, true)) {
                 if (afterCurrent) {
                     queuedProvider = if (queuedProvider == null || queuedProvider == provider) provider else "all"
-                    queuedForce = queuedForce || force
-                    queuedHomeworkOnly = queuedHomeworkOnly && homeworkOnly
-                    queuedCoursesOnly = queuedCoursesOnly && coursesOnly
-                    queuedCurrentWeekOnly = queuedCurrentWeekOnly && currentWeekOnly
+                    queuedScope = if (queuedScope == null || queuedScope == scope) scope else Scope.ALL
                 }
                 finished?.invoke(); return state()
             }
@@ -65,16 +70,22 @@ object AcademicSync {
             var success = true
             var homeworkComplete: Boolean? = null
             var homeworkIssue: String? = null
+            var scheduleIssue: String? = null
             var attempted = 0
             val sessions = AcademicSession(app)
             try {
                 sessions.restore()
                 val connected = sessions.status()
-                val providers = if (homeworkOnly || coursesOnly) listOf("learning") else if (provider == "all") listOf("learning", "school").filter { connected.optBoolean(it) } else listOf(provider)
+                val providers = when {
+                    scope == Scope.HOMEWORK -> listOf("learning")
+                    scope == Scope.COURSES || scope == Scope.RECORDS -> listOf("school")
+                    provider == "all" -> listOf("school", "learning").filter { connected.optBoolean(it) }
+                    else -> listOf(provider)
+                }
                 for (target in providers) {
                     if (!connected.optBoolean(target)) { required.put(target); success = false; continue }
                     attempted++
-                    if (target == "learning" && !coursesOnly) {
+                    if (target == "learning") {
                         homeworkComplete = false
                         homeworkIssue = "暂时无法确认学习通账号或读取本机缓存。"
                     }
@@ -82,21 +93,40 @@ object AcademicSync {
                     if (owner == null) { success = false; continue }
                     val repository = LocalRepository(app, target to owner)
                     try {
-                        val complete = if (target == "learning") learning(app, sessions, repository, owner, homeworkOnly, coursesOnly, currentWeekOnly) {
-                            homeworkComplete = it.complete
-                            homeworkIssue = it.issue
+                        val complete = if (target == "learning") {
+                            val tasks = learning(app, sessions, repository, owner)
+                            homeworkComplete = tasks.complete
+                            homeworkIssue = tasks.issue
+                            tasks.complete
+                        } else if (scope == Scope.RECORDS) {
+                            schoolRecords(sessions, repository)
+                        } else {
+                            val timetable = try {
+                                val schedule = SchoolTimetable.read(AcademicHttp(sessions))
+                                repository.replaceTimetable(schedule.courses, schedule.settings)
+                                true
+                            } catch (e: LoginRequired) { throw e }
+                            catch (e: Exception) {
+                                scheduleIssue = when (e) {
+                                    is IOException -> "无法连接学校教务系统，已保留本机课表"
+                                    is JSONException -> "教务系统未返回完整课表，已保留本机课表"
+                                    is IllegalArgumentException -> e.message
+                                    else -> "教务课表同步未完成，已保留本机课表"
+                                }
+                                false
+                            }
+                            if (scope == Scope.ALL) schoolRecords(sessions, repository) && timetable else timetable
                         }
-                        else school(sessions, repository)
                         val sameAccount = sessions.markForAccount(target, owner, true)
                         success = success && complete && sameAccount
                     } catch (_: LoginRequired) {
                         if (sessions.markForAccount(target, owner, false)) required.put(target)
                         success = false
                     } catch (error: LearningVerificationRequired) {
-                        if (target == "learning" && !coursesOnly) homeworkIssue = error.message
+                        if (target == "learning") homeworkIssue = error.message
                         success = false
                     } catch (error: AcademicResponseError) {
-                        if (target == "learning" && !coursesOnly) homeworkIssue = describeHomeworkFailure(error)
+                        if (target == "learning") homeworkIssue = describeHomeworkFailure(error)
                         success = false
                     }
                     catch (_: Exception) { success = false }
@@ -104,21 +134,19 @@ object AcademicSync {
                 sessions.capture()
                 HomeworkReminders.check(app)
                 current = JSONObject().put("running", false).put("id", runId).put("success", success && attempted > 0).put("needLogin", required).put("finishedAt", System.currentTimeMillis())
-                    .put("homeworkComplete", homeworkComplete).put("homeworkIssue", homeworkIssue)
+                    .put("homeworkComplete", homeworkComplete).put("homeworkIssue", homeworkIssue).put("scheduleIssue", scheduleIssue)
             } catch (_: Exception) {
-                current = JSONObject().put("running", false).put("id", runId).put("success", homeworkOnly && homeworkComplete == true)
-                    .put("needLogin", required).put("homeworkComplete", homeworkComplete).put("homeworkIssue", homeworkIssue)
+                current = JSONObject().put("running", false).put("id", runId).put("success", scope == Scope.HOMEWORK && homeworkComplete == true)
+                    .put("needLogin", required).put("homeworkComplete", homeworkComplete).put("homeworkIssue", homeworkIssue).put("scheduleIssue", scheduleIssue)
                     .put("finishedAt", System.currentTimeMillis())
             } finally {
                 synchronized(startLock) {
                     busy.set(false)
                     val next = queuedProvider
-                    val nextForce = queuedForce
-                    val nextHomeworkOnly = queuedHomeworkOnly
-                    val nextCoursesOnly = queuedCoursesOnly
-                    val nextCurrentWeekOnly = queuedCurrentWeekOnly
-                    queuedProvider = null; queuedForce = false; queuedHomeworkOnly = true; queuedCoursesOnly = true; queuedCurrentWeekOnly = true
-                    if (next != null) start(app, force = nextForce, provider = next, homeworkOnly = nextHomeworkOnly, coursesOnly = nextCoursesOnly, currentWeekOnly = nextCurrentWeekOnly)
+                    val nextScope = queuedScope ?: Scope.ALL
+                    queuedProvider = null
+                    queuedScope = null
+                    if (next != null) start(app, provider = next, scope = nextScope)
                 }
                 finished?.invoke()
             }
@@ -135,20 +163,18 @@ object AcademicSync {
         val owner = prefs.getString("learning.trackingOwner", "")
         val last = maxOf(prefs.getLong("lastHomeworkSync.$owner", 0), prefs.getLong("lastHomeworkCheck.$owner", 0))
         if (saved && !sessions.isLearningVerificationRequired() && System.currentTimeMillis() - last >= HOMEWORK_INTERVAL) {
-            start(context, force = false, provider = "learning", homeworkOnly = true, finished = finished)
+            start(context, provider = "learning", scope = Scope.HOMEWORK, finished = finished)
         }
         else finished?.invoke()
     }
 
-    private fun learning(context: Context, sessions: AcademicSession, repo: LocalRepository, owner: String, homeworkOnly: Boolean, coursesOnly: Boolean, currentWeekOnly: Boolean, onHomeworkComplete: (HomeworkResult) -> Unit): Boolean {
+    private fun learning(context: Context, sessions: AcademicSession, repo: LocalRepository, owner: String): HomeworkResult {
         if (sessions.isLearningVerificationRequired()) throw LearningVerificationRequired()
         val cookie = CookieManager.getInstance().getCookie(PortalPolicy.LEARNING_HOME).orEmpty()
         if (!sessions.status().optBoolean("learning") && !Regex("(?:^|;)\\s*(?:_uid|UID|PUID)=").containsMatchIn(cookie)) throw LoginRequired("learning")
-        // Publish the requested week first; neither a semester sweep nor slow course homework can hold it back.
         val prefs = context.getSharedPreferences("academic-status", Context.MODE_PRIVATE)
-        if (!coursesOnly) prefs.edit().putLong("lastHomeworkCheck.$owner", System.currentTimeMillis()).apply()
-        val plan = if (homeworkOnly) null else try { prepareSchedule(prefs, sessions, repo, owner) } catch (error: LoginRequired) { throw error } catch (_: Exception) { null }
-        val tasks = if (coursesOnly) HomeworkResult(true) else try {
+        prefs.edit().putLong("lastHomeworkCheck.$owner", System.currentTimeMillis()).apply()
+        val tasks = try {
             homework(context, sessions, repo, owner)
         } catch (error: LoginRequired) {
             throw error
@@ -158,89 +184,14 @@ object AcademicSync {
         } catch (error: Exception) {
             HomeworkResult(false, describeHomeworkFailure(error) ?: "无法读取课程或保存本机作业。")
         }
-        if (!coursesOnly) {
-            onHomeworkComplete(tasks)
-            if (tasks.complete) prefs.edit().putLong("lastHomeworkSync.$owner", System.currentTimeMillis()).apply()
-        }
-        if (homeworkOnly) return tasks.complete
-        val scheduleComplete = if (plan == null) false else if (currentWeekOnly && !plan.changedSemester) true else try { finishSchedule(prefs, sessions, repo, owner, plan) } catch (error: LoginRequired) { throw error } catch (_: Exception) { false }
-        return tasks.complete && scheduleComplete
+        if (tasks.complete) prefs.edit().putLong("lastHomeworkSync.$owner", System.currentTimeMillis()).apply()
+        return tasks
     }
 
     private fun <T, R> parallel(values: List<T>, pool: ExecutorService = requests, onComplete: ((R) -> Unit)? = null, action: (T) -> R): List<Result<R>> {
         val completed = ExecutorCompletionService<Result<R>>(pool)
         values.forEach { value -> completed.submit(Callable { runCatching { action(value) } }) }
         return List(values.size) { completed.take().get().also { result -> result.getOrNull()?.let { onComplete?.invoke(it) } } }
-    }
-
-    private fun teachingWeek(start: String): Int? = runCatching {
-        val date = LocalDate.parse(start)
-        val monday = date.minusDays((date.dayOfWeek.value - 1).toLong())
-        (Math.floorDiv(ChronoUnit.DAYS.between(monday, LocalDate.now(ZoneId.of("Asia/Shanghai"))), 7) + 1).toInt().takeIf { it in 1..60 }
-    }.getOrNull()
-
-    private data class SchedulePlan(val settings: JSONObject, val signature: String, val maxWeek: Int, val full: Boolean, val changedSemester: Boolean, val pages: Map<Int, JSONObject>)
-    private fun fetchWeek(sessions: AcademicSession, week: Int): JSONObject {
-        val response = JSONObject(AcademicHttp(sessions).post("https://kb.chaoxing.com/pc/curriculum/getMyLessons", mapOf("week" to week.toString())).body)
-        check(response.optInt("result") == 1) { "课表未返回" }
-        return response.getJSONObject("data")
-    }
-    private fun weekRows(data: JSONObject, week: Int): List<JSONObject> {
-        val raw = data.getJSONArray("lessonArray")
-        val rows = AcademicParsers.lessons(raw, week)
-        check(raw.length() == 0 || rows.size == raw.length()) { "课表格式未完整识别" }
-        return rows
-    }
-    private fun prepareSchedule(prefs: SharedPreferences, sessions: AcademicSession, repo: LocalRepository, owner: String): SchedulePlan {
-        val old = repo.read()
-        val settings = old.getJSONObject("settings")
-        val oldStart = settings.optString("semesterStart")
-        val requested = (teachingWeek(oldStart) ?: 1).coerceIn(1, settings.optInt("teachingWeeks", 60).coerceIn(1, 60))
-        val initial = fetchWeek(sessions, requested)
-        val curriculum = initial.getJSONObject("curriculum")
-        val incoming = AcademicParsers.curriculumSettings(curriculum)
-        val maxWeek = curriculum.optInt("maxWeek", 30).coerceIn(1, 60)
-        val actual = (teachingWeek(incoming.optString("semesterStart", oldStart)) ?: 1).coerceIn(1, maxWeek)
-        val pages = linkedMapOf(requested to initial)
-        val current = pages[actual] ?: fetchWeek(sessions, actual).also { pages[actual] = it }
-        val rows = weekRows(current, actual)
-        val signature = incoming.optString("semesterStart") + ":" + maxWeek
-        val full = prefs.getString("scheduleSignature.$owner", "") != signature || System.currentTimeMillis() - prefs.getLong("lastSchedule.$owner", 0) >= SCHEDULE_INTERVAL
-        val changed = incoming.has("semesterStart") && oldStart.isNotBlank() && oldStart != incoming.optString("semesterStart")
-        if (!changed || old.getJSONArray("courses").length() == 0) {
-            repo.applyRemote("learning", "courses", JSONArray(rows), complete = false, refreshedWeeks = setOf(actual))
-            repo.mergeSettings(incoming)
-        }
-        return SchedulePlan(incoming, signature, maxWeek, full, changed, pages)
-    }
-    private fun finishSchedule(prefs: SharedPreferences, sessions: AcademicSession, repo: LocalRepository, owner: String, plan: SchedulePlan): Boolean {
-        if (!plan.full) return true
-        val results = parallel((1..plan.maxWeek).toList()) { week ->
-            week to weekRows(plan.pages[week] ?: fetchWeek(sessions, week), week)
-        }
-        val refreshed = mutableSetOf<Int>()
-        val merged = linkedMapOf<String, JSONObject>()
-        for (result in results) {
-            val error = result.exceptionOrNull()
-            if (error is LoginRequired) throw error
-            val (week, rows) = result.getOrNull() ?: continue
-            refreshed.add(week)
-            for (row in rows) {
-                val previous = merged[row.getString("id")]
-                if (previous == null) merged[row.getString("id")] = row else previous.getJSONArray("weeks").put(week)
-            }
-        }
-        for (row in merged.values) {
-            val weeks = row.getJSONArray("weeks")
-            row.put("weeks", JSONArray((0 until weeks.length()).map { weeks.getInt(it) }.distinct().sorted()))
-        }
-        val complete = refreshed.size == plan.maxWeek
-        if (refreshed.isNotEmpty() && (!plan.changedSemester || complete)) {
-            repo.applyRemote("learning", "courses", JSONArray(merged.values.toList()), complete = complete, refreshedWeeks = refreshed)
-            repo.mergeSettings(plan.settings)
-        }
-        if (complete) prefs.edit().putLong("lastSchedule.$owner", System.currentTimeMillis()).putString("scheduleSignature.$owner", plan.signature).apply()
-        return complete
     }
 
     private data class CourseWork(val group: String, val records: List<TaskRecord>, val referer: String)
@@ -399,7 +350,7 @@ object AcademicSync {
         return resolved.mapNotNull { it.getOrNull() }.associateBy { it.id }
     }
 
-    private fun school(sessions: AcademicSession, repo: LocalRepository): Boolean {
+    private fun schoolRecords(sessions: AcademicSession, repo: LocalRepository): Boolean {
         val http = AcademicHttp(sessions)
         val document = Jsoup.parse(http.get(PortalPolicy.SCHOOL_HOME).body)
         val year = document.selectFirst("#xnm option[selected]")?.attr("value").orEmpty()

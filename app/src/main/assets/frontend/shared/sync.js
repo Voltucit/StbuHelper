@@ -28,16 +28,20 @@ function applyBoot(boot) {
   maybeShowReceipt();
 }
 
-async function syncNow(provider = 'all') {
+async function syncNow(provider = 'all', kind) {
   if (manualSyncStarting || syncState.running || lifeRefreshing) return;
   if (route === 'life' || route === 'water') return life.connected ? lifeRefresh() : lifeLogin();
-  const coursesOnly = route === 'week', homeworkOnly = route === 'study' && studyTab === 'tasks';
-  if (provider === 'all') provider = route === 'today' || coursesOnly || homeworkOnly ? 'learning' : route === 'study' ? 'school' : 'all';
+  const section = kind || (route === 'study' ? studyTab : route);
+  let scope = 'all';
+  if (section === 'week' || section === 'courses') { scope = 'courses'; provider = 'school'; }
+  else if (section === 'tasks') { scope = 'homework'; provider = 'learning'; }
+  else if (['exams', 'grades', 'credits'].includes(section)) { scope = 'records'; provider = 'school'; }
+  else if (section === 'today') scope = 'home';
   if (provider !== 'all' && !academic[provider]) return openAccount(provider);
   if (!academic.learning && !academic.school) return connect();
   manualSyncStarting = true; showSyncState();
   try {
-    syncState = await Native.call('syncAcademics', { provider, homeworkOnly, coursesOnly, currentWeekOnly: route === 'today' });
+    syncState = await Native.call('syncAcademics', { provider, scope });
     manualSyncId = syncState.id || ''; showSyncState(); pollSync();
   } finally { manualSyncStarting = false; showSyncState(); }
 }
@@ -56,7 +60,7 @@ function notifySync(state) {
   lastSyncNotice = state.id;
   if (state.success) toast('同步成功');
   else if (state.id === manualSyncId) toast(state.needLogin?.length ? '账号登录已失效，请重新连接' :
-    state.homeworkComplete === false && state.homeworkIssue ? state.homeworkIssue : '同步未完成，已保留本机数据');
+    state.scheduleIssue || (state.homeworkComplete === false && state.homeworkIssue ? state.homeworkIssue : '同步未完成，已保留本机数据'));
 }
 
 function pollSync(delay = 1500) {

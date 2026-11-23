@@ -32,7 +32,7 @@ class PortalActivity : Activity() {
         super.onCreate(savedInstanceState)
         val kind = intent.getStringExtra("kind") ?: "courses"
         val verification = intent.getBooleanExtra("verifyLearning", false)
-        provider = if (kind in setOf("grades", "exams", "portal", "school")) "school" else "learning"
+        provider = if (kind in setOf("courses", "grades", "exams", "portal", "school")) "school" else "learning"
         sessions = AcademicSession(applicationContext)
         sessions.restore()
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
@@ -46,7 +46,7 @@ class PortalActivity : Activity() {
             setOnClickListener {
                 if (!remember(web.url)) return@setOnClickListener
                 sessions.clearLearningVerification()
-                AcademicSync.start(applicationContext, provider = "learning", afterCurrent = true, homeworkOnly = true)
+                AcademicSync.start(applicationContext, provider = "learning", afterCurrent = true, scope = AcademicSync.Scope.HOMEWORK)
                 finish()
             }
             toolbar.addView(this)
@@ -144,7 +144,7 @@ class PortalActivity : Activity() {
         catch (_: Exception) { Toast.makeText(this, "快捷登录未能打开，请使用网页二维码或账号登录", Toast.LENGTH_LONG).show() }
     }
     private fun synchronize() {
-        remember(web.url); AcademicSync.start(applicationContext, force = true, provider = provider, afterCurrent = true)
+        remember(web.url); AcademicSync.start(applicationContext, provider = provider, afterCurrent = true)
         if (!intent.getBooleanExtra("stayOpen", false)) finish()
     }
     private fun fillSchool(url: String) {

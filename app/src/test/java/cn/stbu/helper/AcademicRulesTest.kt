@@ -1,9 +1,11 @@
 package cn.stbu.helper
 
+import cn.stbu.helper.backend.academic.SchoolTimetable
 import cn.stbu.helper.backend.academic.AcademicParsers
 import cn.stbu.helper.backend.academic.AcademicHttp
 import cn.stbu.helper.backend.academic.LearningCourse
 import cn.stbu.helper.backend.auth.PortalPolicy
+import cn.stbu.helper.backend.storage.LocalRepository
 import cn.stbu.helper.backend.homework.HomeworkReminderPlan
 import cn.stbu.helper.backend.homework.ReminderTask
 
@@ -36,12 +38,81 @@ class AcademicRulesTest {
         val query = "?redirect_uri=https%3A%2F%2Fi.chaoxing.com%2Fbase%3Fws%3D1%26a%3D2"
         assertEquals("https://passport2.chaoxing.com/oauth2/weixin/login$query", PortalPolicy.https("http://passport2.chaoxing.com/oauth2/weixin/login$query"))
     }
-    @Test fun scheduleRetainsRealWeekAndSectionMetadata() {
-        val rows = JSONArray().put(JSONObject().put("lessonId", "12").put("name", "数学").put("dayOfWeek", 3).put("beginNumber", 2).put("length", 2).put("teacherName", "教师").put("location", "A201"))
-        val record = AcademicParsers.lessons(rows, 7).single()
-        assertEquals(7, record.getJSONArray("weeks").getInt(0))
-        assertEquals(listOf(2, 3), (0 until record.getJSONArray("sections").length()).map { record.getJSONArray("sections").getInt(it) })
+    @Test fun schoolTimetableUsesTheActualWeeksAndSections() {
+        val term = SchoolTimetable.Term("2026", "3")
+        val row = JSONObject().put("kcmc", "数学").put("xqj", "3").put("jcs", "7-10")
+            .put("zcd", "1-5,7-11周(单),12-18周(双)").put("cdmc", "A201").put("xm", "教师")
+        val table = JSONObject().put("xsxx", JSONObject().put("XNM", "2026").put("XQM", "3"))
+            .put("kbList", JSONArray().put(row).put(JSONObject(row.toString()).put("zcd", "6周")))
+        val courses = SchoolTimetable.courses(table, term)
+        assertEquals(1, courses.length())
+        val course = courses.getJSONObject(0)
+        assertEquals("[1,3,5,6,7,9,11,12,14,16,18]", course.getJSONArray("weeks").toString())
+        assertEquals("[7,8,9,10]", course.getJSONArray("sections").toString())
+        assertEquals("school", course.getString("provider"))
+        row.put("zcd", "3-4周,7-18周")
+        assertEquals("[3,4,6,7,8,9,10,11,12,13,14,15,16,17,18]", SchoolTimetable.courses(table, term).getJSONObject(0).getJSONArray("weeks").toString())
+        row.put("zcd", "3周,格式变化")
+        assertThrows(IllegalArgumentException::class.java) { SchoolTimetable.courses(table, term) }
+        table.put("kbList", JSONArray())
+        assertEquals(0, SchoolTimetable.courses(table, term).length())
+        assertThrows(IllegalArgumentException::class.java) { SchoolTimetable.courses(table, SchoolTimetable.Term("2026", "12")) }
     }
+
+    @Test fun schoolCalendarUsesOnlyTheSelectedSemesterAndOrdersBellTimesBySection() {
+        val term = SchoolTimetable.term(Jsoup.parse("<select id=xnm><option value=2025>上学年</option><option selected value=2026>本学年</option></select><input id=xqm value=3>"))
+        val calendar = Jsoup.parse("<input id=xnm value=2026><input id=xqm value=3><input id=dqzc value=13>")
+        val sunday = java.time.LocalDate.parse("2026-11-29")
+        assertEquals("2026-08-31", SchoolTimetable.semesterStart(calendar, term, sunday))
+        assertNull(SchoolTimetable.semesterStart(calendar, SchoolTimetable.Term("2026", "12"), sunday))
+        val periods = JSONArray("""[{"jcmc":"2","qssj":"09:05","jssj":"09:45"},{"jcmc":"1","qssj":"8:20","jssj":"09:00"}]""")
+        assertEquals("08:20-09:00\n09:05-09:45", SchoolTimetable.periodTimes(periods))
+        periods.getJSONObject(0).put("jcmc","3")
+        assertNull(SchoolTimetable.periodTimes(periods))
+    }
+
+    @Test fun successfulSchoolSyncReplacesLegacyCoursesAndPreservesUserEdits() {
+        val document = LocalRepository.empty()
+        val rows = document.getJSONArray("courses")
+        rows.put(JSONObject().put("id", "cx:old").put("source", "school").put("provider", "learning"))
+        rows.put(JSONObject().put("id", "jw:edited").put("source", "manual"))
+        val settings = document.getJSONObject("settings").put("semesterStart", "2026-09-07")
+            .put("customTimetable", true).put("officialTimes", "08:30-09:15").put("summerTimes", "08:00-08:45")
+        val incoming = JSONObject().put("schoolTerm", "2026-3").put("semesterStart", "2026-08-31")
+        val fresh = JSONArray().put(JSONObject().put("id", "jw:new")).put(JSONObject().put("id", "jw:edited"))
+        LocalRepository.applyTimetable(document, fresh, incoming)
+        val result = document.getJSONArray("courses")
+        assertEquals(listOf("jw:edited", "jw:new"), (0 until result.length()).map { result.getJSONObject(it).getString("id") })
+        assertFalse(settings.has("officialTimes"))
+        assertEquals("2026-09-07", settings.getString("semesterStart"))
+        assertEquals("08:00-08:45", settings.getString("summerTimes"))
+        settings.put("officialTimes", "08:20-09:00")
+        LocalRepository.applyTimetable(document, JSONArray(), incoming)
+        assertEquals(1, document.getJSONArray("courses").length())
+        assertEquals("08:20-09:00", settings.getString("officialTimes"))
+    }
+
+    @Test fun accountsArchiveTheSchoolTimetableIndependentlyOfLearning() {
+        val doc = LocalRepository.empty()
+        val settings = doc.getJSONObject("settings")
+        val legacy = JSONObject().put("id", "cx:old").put("provider", "learning").put("source", "school")
+        doc.getJSONArray("courses").put(legacy)
+        LocalRepository.swapAccountData(doc, "school", null)
+        assertEquals("cx:old", doc.getJSONArray("courses").getJSONObject(0).getString("id"))
+        val course = JSONObject().put("id", "jw:a").put("provider", "school").put("source", "school")
+        LocalRepository.applyTimetable(doc, JSONArray().put(course), JSONObject().put("schoolTerm", "2026-3").put("semesterStart", "2026-08-31"))
+        val oldLearningArchive = JSONObject().put("courses", JSONArray().put(legacy)).put("settings", JSONObject().put("semesterStart", "2025-09-01"))
+        LocalRepository.swapAccountData(doc, "learning", oldLearningArchive)
+        assertEquals("jw:a", doc.getJSONArray("courses").getJSONObject(0).getString("id"))
+        assertEquals("2026-08-31", settings.getString("semesterStart"))
+        val schoolArchive = LocalRepository.swapAccountData(doc, "school", null)
+        assertEquals(0, doc.getJSONArray("courses").length())
+        assertFalse(settings.has("schoolTerm"))
+        LocalRepository.swapAccountData(doc, "school", schoolArchive)
+        assertEquals("jw:a", doc.getJSONArray("courses").getJSONObject(0).getString("id"))
+        assertEquals("2026-3", settings.getString("schoolTerm"))
+    }
+
     @Test fun remindersDoNotTreatUnfinishedAsFinishedOrRepeatSameWindow() {
         val now = 1_800_000_000_000L
         val task = ReminderTask("w1", "作业", "未完成", now + 2 * 60 * 60 * 1000)

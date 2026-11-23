@@ -75,7 +75,7 @@ function todayView() {
   const withoutTime = courses.filter(course => course.at === null);
   const upcoming = tasks.filter(row => row.at >= todayEnd);
 
-  const needsAccount = !academic.learning && !data.courses.length && !data.tasks.length;
+  const needsSchool = !academic.school && !data.courses.length;
   const courseNote = !courses.length && data.courses.length && !M.dateOnly(data.settings.semesterStart)
     ? '<div class="agenda-note"><p>请先设置开学日期，才能显示今天的课程。</p><button class="text-button" data-action="settings">学期与作息</button></div>'
     : !courses.length ? `<p class="agenda-note">${esc(Preferences.current().emptyDayMessage)}</p>` : '';
@@ -83,14 +83,14 @@ function todayView() {
   return `<div class="day-agenda">
     <section aria-labelledby="agenda-title">
       <div class="section-row"><h2 id="agenda-title">日程与截止</h2><button class="text-button" data-action="week">整周课表</button></div>
-      ${needsAccount ? empty('还没有日程', '连接学习通后同步课表和作业。', 'open-learning', '连接学习通') : courseNote}
+      ${needsSchool ? empty('还没有课表', '连接学校教务账号后同步课程。', 'open-school', '连接学校教务账号') : courseNote}
       ${timeline.length ? `<ol class="agenda-timeline">${timeline.map(agendaRow).join('')}</ol>` : ''}
       ${withoutTime.length ? `<div class="agenda-untimed"><h3>上课时间待设置</h3><ul>${withoutTime.map(agendaRow).join('')}</ul></div>` : ''}
     </section>
     <section aria-labelledby="agenda-upcoming">
       <div class="section-row"><h2 id="agenda-upcoming">接下来</h2><button class="text-button" data-action="tasks">全部待办</button></div>
       ${upcoming.length ? `<div class="menu-list agenda-future">${upcomingHomework(upcoming, tomorrowEnd, now)}</div>` :
-        `<p class="agenda-note">${needsAccount ? '连接学习通后可查看待办。' : todayTasks.length ? '暂无之后截止的作业。' : esc(Preferences.current().emptyTasksMessage)}</p>`}
+        `<p class="agenda-note">${!academic.learning && !data.tasks.length ? '连接学习通后可查看待办。' : todayTasks.length ? '暂无之后截止的作业。' : esc(Preferences.current().emptyTasksMessage)}</p>`}
     </section>
   </div>`;
 }
