@@ -104,11 +104,14 @@ object QuzhiManager {
         val meterState = try {
             if (activeSession !== active || hasUnsentOrder) return
             nextMeterCheck = now + 5_000
-            if (session?.optInt("activeMeterState", -1) == 0 && finishIdleWater(active) != null) return
+            if (session?.optInt("activeMeterState", -1) == 0) {
+                finishIdleWater(active)
+                return
+            }
             if (ble.isReady && MacFormat.normalize(connectedMac.orEmpty()) == MacFormat.normalize(active.mac)) {
                 ble.query(timeoutMs = 1_500)?.state?.also { state ->
                     if (state == 0) {
-                        if (finishIdleWater(active) == null) rememberStoppedMeter(active, state)
+                        finishIdleWater(active)
                     } else if (BleShowerController.hasPendingSettlement(state)) {
                         rememberStoppedMeter(active, state)
                     }
@@ -213,12 +216,10 @@ object QuzhiManager {
         return current.optJSONObject("pendingReceipt")?.optString("id") == id || current.optString("lastReceiptId") == id
     }
 
-    private fun finishIdleWater(active: BleShowerController.Session): JSONObject? {
+    private fun finishIdleWater(active: BleShowerController.Session): JSONObject {
         val settled = hasRecordedSettlement(active)
-        val display = session?.optJSONObject("activeDisplay") ?: displayFor(active.mac)
-        if (!settled && display.optString("deviceType") != "饮水") return null
         finishWaterSession(active, settlementConfirmed = settled)
-        val message = if (settled) "用水已结束并完成结算。" else "饮水已结束，实际扣费可在消费账单查看。"
+        val message = if (settled) "用水已结束并完成结算。" else "用水已结束，实际扣费可在消费账单查看。"
         return JSONObject().put("message", message).put("active", false).put("settled", settled).put("life", status())
     }
 
@@ -552,23 +553,16 @@ object QuzhiManager {
         val active = activeSession ?: throw IllegalArgumentException("本机没有需要结束的订单。若官方 App 正在用水，请在官方 App 中结束。")
         require(mac == null || MacFormat.normalize(mac) == MacFormat.normalize(active.mac)) { "当前用水设备与所选设备不同，请先结束当前设备" }
         if (hasUnsentOrder) return finishUnsentOrder(active)
-        if (session?.optInt("activeMeterState", -1) == 0) finishIdleWater(active)?.let { return it }
+        if (session?.optInt("activeMeterState", -1) == 0) return finishIdleWater(active)
         if (!ble.isReady || MacFormat.normalize(connectedMac.orEmpty()) != MacFormat.normalize(active.mac)) {
-            if (session?.optInt("activeMeterState", -1) == 0) {
-                return JSONObject().put("message", "设备已停止用水，正在等待官方账单确认。")
-                    .put("active", true).put("settled", false).put("life", status())
-            }
             require(ble.connect(active.mac) is BleConnectResult.Ready) { "未能连接水表，请靠近后重试" }
         }
         connectedMac = active.mac
         val meterState = ble.query(timeoutMs = 1_500)?.state
-        if (meterState == 0) {
-            finishIdleWater(active)?.let { return it }
-            rememberStoppedMeter(active, meterState)
-        }
+        if (meterState == 0) return finishIdleWater(active)
         val knownMeterState = session?.optInt("activeMeterState", -1) ?: -1
-        if (meterState == 0 || (meterState == null && knownMeterState == 0) || (meterState == 1 && knownMeterState != -1)) {
-            return JSONObject().put("message", "设备已停止用水，正在等待官方账单确认。")
+        if (meterState == 1 && knownMeterState != -1) {
+            return JSONObject().put("message", "水表当前显示使用中，上一笔结算待核对。")
                 .put("active", true).put("settled", false).put("life", pollStatus())
         }
         if (meterState != null && BleShowerController.hasPendingSettlement(meterState)) rememberStoppedMeter(active, meterState)
@@ -586,10 +580,8 @@ object QuzhiManager {
                 }
             }
             is BleShowerController.SettleOutcome.PartialSettlement -> {
-                if (result.meterState == 0) {
-                    finishIdleWater(active)?.let { return it }
-                    rememberStoppedMeter(active, 0)
-                } else if (session?.has("activeMeterState") != true) rememberStoppedMeter(active, 3)
+                if (result.meterState == 0) return finishIdleWater(active)
+                if (session?.has("activeMeterState") != true) rememberStoppedMeter(active, 3)
                 result.message
             }
             is BleShowerController.SettleOutcome.CloseFailed -> result.message

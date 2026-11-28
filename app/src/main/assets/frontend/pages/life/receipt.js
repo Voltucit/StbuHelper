@@ -15,7 +15,8 @@ function showWaterReceipt(receipt) {
   if (lastSettlement?.id !== receipt.id) lastSettlement = { id: receipt.id, balancePending: false };
   lastSettlement.deviceCleared = receipt.deviceCleared !== false;
   lastSettlement.settlementConfirmed = settled;
-  sheet(settled ? '本次用水结算' : '饮水已结束', `${settled ? receiptFields(receipt) : ''}<p class="fine">实际扣费可在「生活 → 消费账单」查看。</p><p class="form-error" id="receipt-error" role="alert"></p><button class="primary wide" id="confirm-receipt">${settled ? '确认' : '知道了'}</button>`, () => {
+  lastSettlement.deviceType = receipt.deviceType;
+  sheet(settled ? '本次用水结算' : waterEndedTitle(receipt.deviceType), `${settled ? receiptFields(receipt) : ''}<p class="fine">实际扣费可在「生活 → 消费账单」查看。</p><p class="form-error" id="receipt-error" role="alert"></p><button class="primary wide" id="confirm-receipt">${settled ? '确认' : '知道了'}</button>`, () => {
     receiptConfirmationRequired = true;
     $('close-sheet').disabled = true;
     $('confirm-receipt').onclick = async () => {

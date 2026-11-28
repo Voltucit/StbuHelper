@@ -3,6 +3,9 @@
 function sameDevice(a, b) { return !!a && !!b && String(a).replace(/[:-]/g, '').toUpperCase() === String(b).replace(/[:-]/g, '').toUpperCase(); }
 
 function waterName(kind) { return kind === 'drinking' ? '饮水' : '洗澡'; }
+function waterEndedTitle(deviceType) {
+  return deviceType === '洗澡' || deviceType === '饮水' ? `${deviceType}已结束` : '用水已结束';
+}
 
 function waterStatus() {
   if (life.ratePending) return '<div class="alert"><p>上一笔计费请求尚未确认，请先在趣智校园官方 App 核对。</p><button class="secondary wide" data-action="life-review-rate">我已在官方核对订单</button></div>';
@@ -18,7 +21,7 @@ function waterStatus() {
 
 function settlementView() {
   if (!lastSettlement) return '';
-  const message = lastSettlement.settlementConfirmed === false ? '饮水已结束，实际扣费可在消费账单查看'
+  const message = lastSettlement.settlementConfirmed === false ? `${waterEndedTitle(lastSettlement.deviceType)}，实际扣费可在消费账单查看`
     : lastSettlement.deviceCleared === false ? '已记账，设备记录待清理' : lastSettlement.balancePending ? '用水已结束，余额可稍后刷新' : '用水已结算，明细可在消费账单查看';
   return `<section class="settlement-note"><h3>最近一次使用</h3><p>${message}</p></section>`;
 }
